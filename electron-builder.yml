@@ -1,0 +1,25 @@
+appId: ro.primehr.documents
+productName: PrimeHR Documents
+directories:
+  output: release
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+asarUnpack:
+  - "**/sql.js/dist/*.wasm"
+  - "**/sql.js/dist/*.js"
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: PrimeHR-Documents-Setup-${version}.${ext}
+  signAndEditExecutable: false
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  language: "1048"
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: PrimeHR Documents
