@@ -52,8 +52,17 @@ function requireAuth(req: AuthedRequest, res: Response, next: NextFunction): voi
   next();
 }
 
-const ALLOWED_MIME = new Set(["application/pdf", "image/png"]);
-const ALLOWED_EXT = new Set([".pdf", ".png"]);
+const ALLOWED_MIME = new Set([
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+]);
+const ALLOWED_EXT = new Set([".pdf", ".png", ".jpg", ".jpeg", ".webp", ".doc", ".docx", ".xls", ".xlsx"]);
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -63,11 +72,16 @@ const upload = multer({
       cb(null, `igm-${randomUUID()}${ext}`);
     },
   }),
-  limits: { fileSize: 15 * 1024 * 1024 },
+  limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    if (!ALLOWED_MIME.has(file.mimetype) || !ALLOWED_EXT.has(ext)) {
-      cb(new Error("Doar fișiere PDF sau PNG sunt acceptate"));
+    // Some browsers send empty/octet-stream for Office docs — allow by extension.
+    const mimeOk =
+      ALLOWED_MIME.has(file.mimetype) ||
+      file.mimetype === "application/octet-stream" ||
+      !file.mimetype;
+    if (!mimeOk || !ALLOWED_EXT.has(ext)) {
+      cb(new Error("Tipuri acceptate: PDF, PNG, JPG, WEBP, DOC, DOCX, XLS, XLSX"));
       return;
     }
     cb(null, true);
@@ -169,13 +183,14 @@ export function createIgmRouter(): Router {
       const lastName = igmRequired(req.body?.lastName, 100);
       const status = igmText(req.body?.status || (companyId ? "Activ" : "În procesare"), 40);
       const notes = igmText(req.body?.notes, 1000);
+      const pipelineStep = igmText(req.body?.pipelineStep || "Cerere firmă", 40) || "Cerere firmă";
       getDb()
         .prepare(
           `INSERT INTO igm_candidates
-           (id, first_name, last_name, company_id, status, notes, created_at, deleted_at, archive_reason, last_work_date)
-           VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '')`,
+           (id, first_name, last_name, company_id, status, notes, created_at, deleted_at, archive_reason, last_work_date, pipeline_step, pipeline_step_at, pipeline_deadline)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, '')`,
         )
-        .run(id, firstName, lastName, companyId, status, notes, createdAt);
+        .run(id, firstName, lastName, companyId, status, notes, createdAt, pipelineStep, createdAt);
       const row = {
         id,
         firstName,
@@ -187,6 +202,9 @@ export function createIgmRouter(): Router {
         deletedAt: "",
         archiveReason: "",
         lastWorkDate: "",
+        pipelineStep,
+        pipelineStepAt: createdAt,
+        pipelineDeadline: "",
       };
       notifyIgm("candidate_created", { candidate: row });
       res.status(201).json({ candidate: row });
@@ -206,11 +224,31 @@ export function createIgmRouter(): Router {
       const lastName = igmRequired(req.body?.lastName, 100);
       const status = igmRequired(req.body?.status, 40);
       const notes = igmText(req.body?.notes, 1000);
+      const pipelineStep =
+        igmText(req.body?.pipelineStep ?? c.pipeline_step ?? "Cerere firmă", 40) || "Cerere firmă";
+      const stepChanged = pipelineStep !== String(c.pipeline_step || "Cerere firmă");
+      const pipelineStepAt = stepChanged
+        ? stampNow()
+        : String(c.pipeline_step_at || c.created_at || stampNow());
+      const pipelineDeadline =
+        req.body?.pipelineDeadline !== undefined
+          ? igmText(req.body.pipelineDeadline, 20)
+          : String(c.pipeline_deadline || "");
+      const before = mapCandidateRow(c);
       getDb()
         .prepare(
-          `UPDATE igm_candidates SET first_name = ?, last_name = ?, status = ?, notes = ? WHERE id = ?`,
+          `UPDATE igm_candidates SET first_name = ?, last_name = ?, status = ?, notes = ?, pipeline_step = ?, pipeline_step_at = ?, pipeline_deadline = ? WHERE id = ?`,
         )
-        .run(firstName, lastName, status, notes, req.params.id);
+        .run(
+          firstName,
+          lastName,
+          status,
+          notes,
+          pipelineStep,
+          pipelineStepAt,
+          pipelineDeadline,
+          req.params.id,
+        );
       const out = {
         id: req.params.id,
         firstName,
@@ -222,7 +260,11 @@ export function createIgmRouter(): Router {
         deletedAt: "",
         archiveReason: "",
         lastWorkDate: "",
+        pipelineStep,
+        pipelineStepAt,
+        pipelineDeadline,
       };
+      writeAudit("candidates", req.params.id, stepChanged ? "PIPELINE" : "UPDATE", before, out, req.user!);
       notifyIgm("candidate_updated", { candidate: out });
       res.json({ candidate: out });
     } catch (err) {
@@ -806,6 +848,41 @@ export function createIgmRouter(): Router {
     }
   });
 
+  router.delete("/files/:id", (req: AuthedRequest, res) => {
+    try {
+      const db = getDb();
+      const file = db
+        .prepare("SELECT * FROM igm_files WHERE id = ?")
+        .get(req.params.id) as Record<string, unknown> | undefined;
+      if (!file) throw new IgmError("Fișier inexistent.", 404);
+      const full = path.join(getUploadsDir(), String(file.stored_name));
+      db.prepare("DELETE FROM igm_files WHERE id = ?").run(req.params.id);
+      if (fs.existsSync(full)) {
+        try {
+          fs.unlinkSync(full);
+        } catch {
+          /* disk cleanup best-effort */
+        }
+      }
+      const docId = String(file.document_id || "");
+      const remaining = db
+        .prepare("SELECT COUNT(*) AS c FROM igm_files WHERE document_id = ?")
+        .get(docId) as { c: number } | undefined;
+      if (docId && Number(remaining?.c || 0) === 0) {
+        const doc = findDocument(docId);
+        if (doc && String(doc.notes || "").includes("Atașat")) {
+          db.prepare(
+            `UPDATE igm_documents SET deleted_at = ?, notes = ? WHERE id = ? AND deleted_at = ''`,
+          ).run(stampNow(), `${String(doc.notes || "")} · fișier șters`, docId);
+        }
+      }
+      notifyIgm("file_deleted", { fileId: Number(req.params.id), documentId: docId });
+      res.json({ ok: true });
+    } catch (err) {
+      handleIgmError(res, err);
+    }
+  });
+
   return router;
 }
 
@@ -830,6 +907,9 @@ function mapCandidateRow(c: Record<string, unknown>) {
     deletedAt: c.deleted_at || "",
     archiveReason: c.archive_reason || "",
     lastWorkDate: c.last_work_date || "",
+    pipelineStep: String(c.pipeline_step || "Cerere firmă"),
+    pipelineStepAt: String(c.pipeline_step_at || c.created_at || ""),
+    pipelineDeadline: String(c.pipeline_deadline || ""),
   };
 }
 

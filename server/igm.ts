@@ -11,6 +11,7 @@ export const DOC_TYPES = [
   "Decizie",
   "Pasaport Nepal",
   "Cazier",
+  "Contract",
   "Alt document",
 ] as const;
 
@@ -169,6 +170,9 @@ function mapCandidate(r: Record<string, unknown>) {
     deletedAt: r.deleted_at || "",
     archiveReason: r.archive_reason || "",
     lastWorkDate: r.last_work_date || "",
+    pipelineStep: String(r.pipeline_step || "Cerere firmă"),
+    pipelineStepAt: String(r.pipeline_step_at || r.created_at || ""),
+    pipelineDeadline: String(r.pipeline_deadline || ""),
   };
 }
 
@@ -371,8 +375,8 @@ export function resolveCandidateId(
   getDb()
     .prepare(
       `INSERT INTO igm_candidates
-       (id, first_name, last_name, company_id, status, notes, created_at, deleted_at, archive_reason, last_work_date)
-       VALUES (?, ?, ?, ?, 'În procesare', ?, ?, '', '', '')`,
+       (id, first_name, last_name, company_id, status, notes, created_at, deleted_at, archive_reason, last_work_date, pipeline_step, pipeline_step_at, pipeline_deadline)
+       VALUES (?, ?, ?, ?, 'În procesare', ?, ?, '', '', '', 'Cerere firmă', ?, '')`,
     )
     .run(
       newId,
@@ -380,6 +384,7 @@ export function resolveCandidateId(
       igmRequired(last, 100),
       companyId,
       "Creat din modulul documente IGM",
+      now(),
       now(),
     );
   return newId;
@@ -401,7 +406,8 @@ export function documentFields(v: Record<string, unknown>): {
     throw new IgmError("Tip document invalid.");
   }
   const passport = type === "Pasaport Nepal";
-  const issue = v.issueDate ? igmDate(v.issueDate) : "";
+  const loose = type === "Contract" || type === "Alt document";
+  const issue = v.issueDate ? igmDate(v.issueDate) : loose ? now().slice(0, 10) : "";
   const sentDate = passport ? igmDate(v.sentDate) : "";
   const deliveryDate = passport && v.deliveryDate ? igmDate(v.deliveryDate) : "";
   if (!passport && !issue) throw new IgmError("Data emiterii este obligatorie.");

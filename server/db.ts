@@ -288,7 +288,10 @@ export async function initDatabase(baseDir: string): Promise<void> {
       created_at TEXT NOT NULL,
       deleted_at TEXT NOT NULL DEFAULT '',
       archive_reason TEXT NOT NULL DEFAULT '',
-      last_work_date TEXT NOT NULL DEFAULT ''
+      last_work_date TEXT NOT NULL DEFAULT '',
+      pipeline_step TEXT NOT NULL DEFAULT 'Cerere firmă',
+      pipeline_step_at TEXT NOT NULL DEFAULT '',
+      pipeline_deadline TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS igm_documents (
@@ -384,8 +387,20 @@ export async function initDatabase(baseDir: string): Promise<void> {
   `);
   persist();
 
+  ensureColumn("igm_candidates", "pipeline_step", "TEXT NOT NULL DEFAULT 'Cerere firmă'");
+  ensureColumn("igm_candidates", "pipeline_step_at", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn("igm_candidates", "pipeline_deadline", "TEXT NOT NULL DEFAULT ''");
+
   seedIfNeeded();
   ensureIgmUser();
+}
+
+function ensureColumn(table: string, column: string, definition: string): void {
+  const database = getDb();
+  const cols = database.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (cols.some((c) => c.name === column)) return;
+  database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  persist();
 }
 
 function seedIfNeeded(): void {

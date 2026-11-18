@@ -1,15 +1,30 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useOutletContext } from "react-router-dom";
 import { getWsUrl } from "../../lib/api";
 import {
   DOC_TYPE_BY_PAGE,
-  IGM_PAGES,
   IgmApi,
   type IgmCandidate,
   type IgmData,
   type IgmPageName,
 } from "../../lib/igmApi";
 import type { ShellOutletContext } from "../ShellPage";
+import {
+  CandidateDocsPanel,
+  PipelineCompaniesView,
+  PipelineCompanyPeopleView,
+  PipelinePersonView,
+} from "./PipelineViews";
+import {
+  IGM_NAV_PRIMARY,
+  IGM_NAV_SECONDARY,
+  PIPELINE_STEPS,
+  companyStats,
+  delayedProcessPeople,
+  inferPipelineStep,
+  urgentProcessPeople,
+  type PipelineStep,
+} from "./pipeline";
 import {
   active,
   activeCompanies,
@@ -73,13 +88,40 @@ export default function IgmPage() {
   const [editId, setEditId] = useState("");
   const [presetType, setPresetType] = useState("Invitatie");
   const [formError, setFormError] = useState("");
+  const [pipeCompanyId, setPipeCompanyId] = useState("");
+  const [pipeCandidateId, setPipeCandidateId] = useState("");
+  const [nightMode, setNightMode] = useState(() => {
+    if (localStorage.getItem("primehr_ui_v") !== "blue-light-1") {
+      localStorage.setItem("primehr_ui_v", "blue-light-1");
+      localStorage.setItem("primehr_night", "0");
+      return false;
+    }
+    return localStorage.getItem("primehr_night") === "1";
+  });
+  const [showMoreNav, setShowMoreNav] = useState(false);
 
-  const roleBadge =
-    user.role === "CEO"
-      ? "CEO Documente"
-      : user.role === "ADMIN"
-        ? "Admin Documente"
-        : "Angajat IGM";
+  useEffect(() => {
+    localStorage.setItem("primehr_night", nightMode ? "1" : "0");
+    document.documentElement.classList.toggle("night", nightMode);
+    return () => document.documentElement.classList.remove("night");
+  }, [nightMode]);
+
+  const isBoss = user.role === "CEO" || user.role === "ADMIN";
+  const roleBadge = isBoss ? "Șefă operațiuni" : "Angajat IGM";
+
+  const pipeMode = page === "Companii";
+  const hideDefaultHeader =
+    pipeMode && (Boolean(pipeCompanyId) || Boolean(pipeCandidateId));
+
+  const primaryNav = IGM_NAV_PRIMARY as readonly IgmPageName[];
+  const secondaryNav = useMemo(
+    () =>
+      (IGM_NAV_SECONDARY as readonly IgmPageName[]).filter((p) => {
+        if (!isBoss && p === "Candidați arhivați") return false;
+        return true;
+      }),
+    [isBoss],
+  );
 
   const refresh = useCallback(async () => {
     const bundle = await IgmApi.data();
@@ -168,16 +210,64 @@ export default function IgmPage() {
     await run(() => IgmApi.markSeen(cat, items));
   }
 
+  async function uploadCandidateFile(candidateId: string, file: File, docType: string) {
+    const person = data.candidates.find((c) => c.id === candidateId);
+    if (!person) throw new Error("Candidat inexistent");
+    setBusy(true);
+    setError(null);
+    try {
+      const passport = docType === "Pasaport Nepal";
+      const created = await IgmApi.addDocument({
+        type: docType,
+        candidateId: person.id,
+        companyId: person.companyId,
+        issueDate: passport ? "" : today(),
+        number: "",
+        notes: `Atașat pe dosar · ${docType}`,
+        alertDays: passport ? "" : 30,
+        trackingNumber: passport ? `UP-${Date.now()}` : "",
+        sentDate: passport ? today() : "",
+      });
+      await IgmApi.uploadFile(created.document.id, file);
+      await refresh();
+      setFlash("Document încărcat — vizibil pentru toți pe host");
+      setTimeout(() => setFlash(null), 2500);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Upload eșuat";
+      setError(msg);
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteCandidateFile(fileId: number) {
+    setBusy(true);
+    setError(null);
+    try {
+      await IgmApi.deleteFile(fileId);
+      await refresh();
+      setFlash("Fișier șters");
+      setTimeout(() => setFlash(null), 2000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Ștergere eșuată";
+      setError(msg);
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="igm-root">
       <div className="igm-layout">
         <nav className="igm-nav" aria-label="Secțiuni IGM">
           <div className="igm-nav-brand">
-            Documente &amp; IGM
-            <small>Prime HR Solutions</small>
+            PrimeHR
+            <small>Documente &amp; IGM</small>
           </div>
           <div className="igm-nav-scroll">
-            {IGM_PAGES.map((p) => (
+            {primaryNav.map((p) => (
               <button
                 key={p}
                 type="button"
@@ -186,34 +276,110 @@ export default function IgmPage() {
                   setPage(p);
                   setFilter("");
                   setSelected("");
+                  setShowMoreNav(false);
+                  if (p === "Companii") {
+                    setPipeCompanyId("");
+                    setPipeCandidateId("");
+                  }
                 }}
               >
-                <span>{p}</span>
+                <span className="igm-nav-ico" aria-hidden>
+                  <NavIcon name={p} />
+                </span>
+                <span className="igm-nav-label">{shortNavLabel(p)}</span>
                 {p === "Alerte & Termene" && alertCount > 0 ? (
                   <span className="igm-badge">{alertCount}</span>
                 ) : null}
-                {p === "Candidați arhivați" && archivedUnseen > 0 ? (
-                  <span className="igm-badge">{archivedUnseen}</span>
-                ) : null}
               </button>
             ))}
+            <div className="igm-nav-divider" />
+            <button
+              type="button"
+              className={`igm-nav-btn igm-nav-more ${showMoreNav ? "open" : ""}`}
+              onClick={() => setShowMoreNav((v) => !v)}
+            >
+              <span className="igm-nav-ico" aria-hidden>
+                <NavIcon name="more" />
+              </span>
+              <span className="igm-nav-label">{showMoreNav ? "Mai puțin" : "Mai mult"}</span>
+            </button>
+            {showMoreNav
+              ? secondaryNav.map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    className={`igm-nav-btn igm-nav-sub ${page === p ? "active" : ""}`}
+                    onClick={() => {
+                      setPage(p);
+                      setFilter("");
+                      setSelected("");
+                    }}
+                  >
+                    <span className="igm-nav-label">{p}</span>
+                    {p === "Candidați arhivați" && archivedUnseen > 0 ? (
+                      <span className="igm-badge">{archivedUnseen}</span>
+                    ) : null}
+                  </button>
+                ))
+              : null}
+          </div>
+          <div className="igm-nav-foot">
+            <button
+              type="button"
+              className="igm-logout-btn igm-logout-nav"
+              onClick={() => {
+                void onLogout().then(() => navigate("/login"));
+              }}
+            >
+              Ieșire
+            </button>
+            <button
+              type="button"
+              className={`igm-night-btn ${nightMode ? "active" : ""}`}
+              onClick={() => setNightMode((v) => !v)}
+              title={nightMode ? "Mod zi" : "Night mode"}
+            >
+              {nightMode ? "Mod zi" : "Night mode"}
+            </button>
           </div>
         </nav>
 
         <div className="igm-main">
-          <header className="igm-header">
-            <div>
-              <h1>{page === "Dashboard" ? "Dashboard IGM" : page}</h1>
-              <p className="lead">Evidența documentelor și operațiunilor IGM</p>
+          <header className={`igm-header ${hideDefaultHeader ? "igm-header-tools-only" : ""}`}>
+            {!hideDefaultHeader ? (
+              <div className="igm-header-title">
+                <h1>{page === "Dashboard" ? "Astăzi" : page}</h1>
+              </div>
+            ) : (
+              <div />
+            )}
+            <div className="igm-header-tools">
+              <span className="igm-user-chip">
+                <span className="igm-user-avatar" aria-hidden>
+                  {(user.username || "U").slice(0, 1).toUpperCase()}
+                </span>
+                {user.username || "admin"}
+              </span>
             </div>
-            <span className="badge">{roleBadge}</span>
           </header>
 
+          <div className="igm-body">
           {flash ? <div className="igm-flash">{flash}</div> : null}
           {error ? <div className="error">{error}</div> : null}
           {busy && !modal ? <p className="hint">Se încarcă…</p> : null}
 
-          {page === "Dashboard" ? <DashboardView data={data} go={setPage} /> : null}
+          {page === "Dashboard" ? (
+            <DashboardView
+              data={data}
+              go={setPage}
+              openCompany={(companyId, candidateId) => {
+                setPage("Companii");
+                setPipeCompanyId(companyId);
+                setPipeCandidateId(candidateId || "");
+              }}
+              openModal={openModal}
+            />
+          ) : null}
           {page === "Calendar IGM" ? (
             <CalendarView
               data={data}
@@ -234,6 +400,9 @@ export default function IgmPage() {
               selected={selected}
               setSelected={setSelected}
               openModal={openModal}
+              busy={busy}
+              onUploadFile={(id, file, type) => uploadCandidateFile(id, file, type)}
+              onDeleteFile={(fileId) => deleteCandidateFile(fileId)}
               onRestore={(id) => {
                 if (window.confirm("Reactivăm candidatul în registru?")) {
                   void run(() => IgmApi.restoreCandidate(id));
@@ -243,13 +412,93 @@ export default function IgmPage() {
               unseenArchived={archivedUnseen}
             />
           ) : null}
-          {page === "Companii" ? (
-            <CompaniesView
+          {page === "Companii" && !pipeCompanyId && !pipeCandidateId ? (
+            <PipelineCompaniesView
               data={data}
               filter={filter}
               setFilter={setFilter}
-              openModal={openModal}
-              softDelete={softDelete}
+              openModal={(k, id) => openModal(k, id)}
+              onOpenCompany={(id) => {
+                setPipeCompanyId(id);
+                setPipeCandidateId("");
+              }}
+            />
+          ) : null}
+          {page === "Companii" && pipeCompanyId && !pipeCandidateId ? (
+            <PipelineCompanyPeopleView
+              data={data}
+              companyId={pipeCompanyId}
+              openModal={(k) => {
+                if (k === "candidate") {
+                  openModal("candidate");
+                } else {
+                  openModal(k);
+                }
+              }}
+              onBack={() => {
+                setPipeCompanyId("");
+                setPipeCandidateId("");
+              }}
+              onOpenPerson={(id) => setPipeCandidateId(id)}
+            />
+          ) : null}
+          {page === "Companii" && pipeCandidateId ? (
+            <PipelinePersonView
+              data={data}
+              candidateId={pipeCandidateId}
+              busy={busy}
+              onBackCompanies={() => {
+                setPipeCompanyId("");
+                setPipeCandidateId("");
+              }}
+              onBackCompany={() => setPipeCandidateId("")}
+              onAdvance={(step: PipelineStep) => {
+                const person = data.candidates.find((c) => c.id === pipeCandidateId);
+                if (!person) return;
+                void run(() =>
+                  IgmApi.updateCandidate(person.id, {
+                    firstName: person.firstName,
+                    lastName: person.lastName,
+                    status: person.status,
+                    notes: person.notes,
+                    companyId: person.companyId,
+                    pipelineStep: step,
+                    pipelineDeadline: "",
+                  }),
+                );
+              }}
+              onRollback={(step: PipelineStep) => {
+                const person = data.candidates.find((c) => c.id === pipeCandidateId);
+                if (!person) return;
+                void run(() =>
+                  IgmApi.updateCandidate(person.id, {
+                    firstName: person.firstName,
+                    lastName: person.lastName,
+                    status: person.status,
+                    notes: person.notes,
+                    companyId: person.companyId,
+                    pipelineStep: step,
+                    pipelineDeadline: "",
+                  }),
+                );
+              }}
+              onUpload={(file, docType) => uploadCandidateFile(pipeCandidateId, file, docType)}
+              onDeleteFile={(fileId) => deleteCandidateFile(fileId)}
+              onSetDeadline={(deadline) => {
+                const person = data.candidates.find((c) => c.id === pipeCandidateId);
+                if (!person) return;
+                void run(() =>
+                  IgmApi.updateCandidate(person.id, {
+                    firstName: person.firstName,
+                    lastName: person.lastName,
+                    status: person.status,
+                    notes: person.notes,
+                    companyId: person.companyId,
+                    pipelineStep: person.pipelineStep,
+                    pipelineDeadline: deadline,
+                  }),
+                );
+              }}
             />
           ) : null}
           {DOC_TYPE_BY_PAGE[page] ? (
@@ -297,17 +546,6 @@ export default function IgmPage() {
             />
           ) : null}
           {page === "Rapoarte" ? <ReportsView data={data} /> : null}
-
-          <div className="igm-main-foot">
-            <button
-              type="button"
-              className="igm-logout-btn"
-              onClick={() => {
-                void onLogout().then(() => navigate("/login"));
-              }}
-            >
-              Ieșire
-            </button>
           </div>
         </div>
       </div>
@@ -317,6 +555,7 @@ export default function IgmPage() {
           kind={modal}
           editId={editId}
           presetType={presetType}
+          presetCompanyId={pipeCompanyId}
           data={data}
           formError={formError}
           busy={busy}
@@ -331,7 +570,11 @@ export default function IgmPage() {
                   await IgmApi.updateCompany(editId, String(body.name));
                   break;
                 case "candidate":
-                  await IgmApi.addCandidate(body);
+                  await IgmApi.addCandidate({
+                    ...body,
+                    pipelineStep: "Cerere firmă",
+                    companyId: body.companyId || pipeCompanyId,
+                  });
                   break;
                 case "candidateEdit":
                   await IgmApi.updateCandidate(editId, body);
@@ -382,108 +625,343 @@ function Chip({ text, color = "blue" }: { text: string; color?: string }) {
   return <span className={`igm-chip ${color}`}>{text}</span>;
 }
 
-function Metric({ label, value, sub }: { label: string; value: number | string; sub: string }) {
+function shortNavLabel(p: IgmPageName): string {
+  if (p === "Alerte & Termene") return "Alerte";
+  return p;
+}
+
+function NavIcon({ name }: { name: string }) {
+  const common = {
+    width: 16,
+    height: 16,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+  if (name === "Dashboard") {
+    return (
+      <svg {...common}>
+        <rect x="3" y="3" width="7" height="9" rx="1.5" />
+        <rect x="14" y="3" width="7" height="5" rx="1.5" />
+        <rect x="14" y="12" width="7" height="9" rx="1.5" />
+        <rect x="3" y="16" width="7" height="5" rx="1.5" />
+      </svg>
+    );
+  }
+  if (name === "Companii") {
+    return (
+      <svg {...common}>
+        <path d="M3 21h18" />
+        <path d="M5 21V7l7-4 7 4v14" />
+        <path d="M9 21v-6h6v6" />
+      </svg>
+    );
+  }
+  if (name === "Candidați") {
+    return (
+      <svg {...common}>
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="3" />
+        <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+        <path d="M16 3.13a3 3 0 0 1 0 5.74" />
+      </svg>
+    );
+  }
+  if (name === "Alerte & Termene") {
+    return (
+      <svg {...common}>
+        <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+        <path d="M10 21a2 2 0 0 0 4 0" />
+      </svg>
+    );
+  }
+  if (name === "Rapoarte") {
+    return (
+      <svg {...common}>
+        <path d="M4 19V5" />
+        <path d="M4 19h16" />
+        <path d="M8 17V10" />
+        <path d="M12 17V7" />
+        <path d="M16 17v-4" />
+      </svg>
+    );
+  }
   return (
-    <div className="igm-metric">
-      <div className="heading">{label}</div>
-      <div className="num">{value}</div>
-      <div className="caption">{sub}</div>
+    <svg {...common}>
+      <circle cx="5" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      <circle cx="19" cy="12" r="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function shortPipeLabel(step: PipelineStep): string {
+  if (step === "Cerere firmă") return "Cerere";
+  if (step === "Sosire Moldova") return "Sosire";
+  if (step === "Contract semnat") return "Contract";
+  return step;
+}
+
+function StatusPill({
+  text,
+  tone,
+}: {
+  text: string;
+  tone: "red" | "green" | "blue";
+}) {
+  return <span className={`dash-pill dash-pill-${tone}`}>{text}</span>;
+}
+
+function DashboardView({
+  data,
+  go,
+  openCompany,
+  openModal,
+}: {
+  data: IgmData;
+  go: (p: IgmPageName) => void;
+  openCompany: (companyId: string, candidateId?: string) => void;
+  openModal: (kind: ModalKind, id?: string) => void;
+}) {
+  const late = delayedProcessPeople(data);
+  const soon = urgentProcessPeople(data);
+  const people = activePeople(data);
+  const firms = activeCompanies(data);
+  const expDocs = activeDocs(data).filter((x) => {
+    if (!x.expiryDate || x.type === "Pasaport Nepal") return false;
+    const d = daysUntil(x.expiryDate);
+    return d !== null && d <= 30;
+  });
+
+  const stepCounts = PIPELINE_STEPS.map((step) => ({
+    step,
+    count: people.filter((c) => inferPipelineStep(data, c) === step).length,
+  }));
+  const hotStep =
+    stepCounts.slice(0, -1).sort((a, b) => b.count - a.count)[0]?.step || "Documentare";
+
+  const todoRows = [
+    ...late.map((x) => ({ ...x, kind: "late" as const })),
+    ...soon
+      .filter((s) => !late.some((l) => l.c.id === s.c.id))
+      .map((x) => ({ ...x, kind: "urgent" as const })),
+    ...people
+      .filter(
+        (c) =>
+          !late.some((l) => l.c.id === c.id) &&
+          !soon.some((s) => s.c.id === c.id) &&
+          inferPipelineStep(data, c) !== "Finalizat",
+      )
+      .map((c) => ({
+        c,
+        step: inferPipelineStep(data, c),
+        days: null as number | null,
+        kind: "work" as const,
+      })),
+  ].slice(0, 8);
+
+  const companyRows = firms
+    .map((f) => {
+      const st = companyStats(data, f.id);
+      const members = people.filter((c) => c.companyId === f.id);
+      const avg =
+        members.length === 0
+          ? 0
+          : members.reduce((sum, c) => sum + PIPELINE_STEPS.indexOf(inferPipelineStep(data, c)), 0) /
+            members.length;
+      const progress = Math.round((avg / Math.max(1, PIPELINE_STEPS.length - 1)) * 100);
+      return { f, st, progress: Math.min(100, Math.max(st.total ? 10 : 0, progress)) };
+    })
+    .sort((a, b) => b.st.late - a.st.late || b.st.total - a.st.total)
+    .slice(0, 8);
+
+  const upcoming = buildUpcoming(data).slice(0, 8);
+
+  const weekDays = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() + i);
+    const key = [
+      d.getFullYear(),
+      String(d.getMonth() + 1).padStart(2, "0"),
+      String(d.getDate()).padStart(2, "0"),
+    ].join("-");
+    const items = upcoming.filter((x) => x.date === key);
+    return {
+      key,
+      label: d.toLocaleDateString("ro-RO", { weekday: "short", day: "2-digit" }),
+      items,
+    };
+  });
+
+  return (
+    <div className="dash-ops">
+      <section className="dash-rail" aria-label="Pipeline">
+        {stepCounts.map(({ step, count }) => (
+          <div key={step} className={`dash-rail-cell ${step === hotStep ? "hot" : ""}`}>
+            <strong>{count}</strong>
+            <span>{shortPipeLabel(step)}</span>
+          </div>
+        ))}
+      </section>
+
+      <section className="dash-bento">
+        <div className="dash-card dash-todo">
+          <div className="dash-card-head">
+            <h2>De făcut acum</h2>
+            <span>{todoRows.length}</span>
+          </div>
+          {todoRows.length ? (
+            todoRows.map(({ c, step, kind }) => (
+              <button
+                key={c.id}
+                type="button"
+                className="dash-item"
+                onClick={() => openCompany(c.companyId, c.id)}
+              >
+                <div>
+                  <strong>{cn(c)}</strong>
+                  <small>
+                    {companyName(data, c.companyId)} · {shortPipeLabel(step)}
+                  </small>
+                </div>
+                <StatusPill
+                  text={kind === "late" ? "ÎNTÂRZIAT" : kind === "urgent" ? "URGENT" : "ÎN LUCRU"}
+                  tone={kind === "late" ? "red" : kind === "urgent" ? "green" : "blue"}
+                />
+              </button>
+            ))
+          ) : (
+            <p className="dash-empty">Nimic urgent. Bun.</p>
+          )}
+        </div>
+
+        <div className="dash-mid">
+          <div className="dash-card dash-stat">
+            <span>Întârziați</span>
+            <strong>{late.length}</strong>
+            <small>termen proces</small>
+          </div>
+          <button type="button" className="dash-card dash-stat dash-stat-btn" onClick={() => go("Alerte & Termene")}>
+            <span>Doc. ≤ 30z</span>
+            <strong>{expDocs.length}</strong>
+            {expDocs[0] ? (
+              <small>
+                {cn(candidateOf(data, expDocs[0].candidateId))} · {expDocs[0].type}
+              </small>
+            ) : (
+              <small>nimic pe radar</small>
+            )}
+          </button>
+        </div>
+
+        <div className="dash-card dash-firms">
+          <div className="dash-card-head">
+            <h2>Companii</h2>
+            <button type="button" className="dash-link" onClick={() => go("Companii")}>
+              Toate →
+            </button>
+          </div>
+          {companyRows.length ? (
+            companyRows.map(({ f, st, progress }) => (
+              <button key={f.id} type="button" className="dash-firm" onClick={() => openCompany(f.id)}>
+                <div className="dash-firm-top">
+                  <strong>{f.name}</strong>
+                  <span>{st.total}</span>
+                </div>
+                <div className="dash-progress" aria-hidden>
+                  <i style={{ width: `${progress}%` }} />
+                </div>
+                <small>
+                  {st.late ? `${st.late} întârziați` : st.documentare ? `${st.documentare} documentare` : "în lucru"}
+                </small>
+              </button>
+            ))
+          ) : (
+            <p className="dash-empty">Nicio companie.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="dash-card dash-upcoming">
+        <div className="dash-card-head">
+          <h2>Urmează · 7 zile</h2>
+          <button type="button" className="dash-link" onClick={() => go("Calendar IGM")}>
+            Calendar →
+          </button>
+        </div>
+
+        <div className="dash-week">
+          {weekDays.map((day) => (
+            <div key={day.key} className={`dash-week-day ${day.items.length ? "has" : ""}`}>
+              <span className="dash-week-label">{day.label}</span>
+              {day.items.length ? (
+                day.items.slice(0, 2).map((item, i) => (
+                  <button
+                    key={`${item.kind}-${i}`}
+                    type="button"
+                    className="dash-week-chip"
+                    onClick={() => go(item.page)}
+                    title={`${item.kind} · ${item.detail}`}
+                  >
+                    {item.kind.replace("Expirare ", "")}
+                  </button>
+                ))
+              ) : (
+                <span className="dash-week-empty">—</span>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="dash-upcoming-grid">
+          {upcoming.map((item, i) => (
+            <button
+              key={`${item.date}-${item.kind}-${i}`}
+              type="button"
+              className="dash-upcoming-item"
+              onClick={() => go(item.page)}
+            >
+              <span className="dash-upcoming-date">{fmt(item.date)}</span>
+              <strong>{item.kind}</strong>
+              <small>{item.detail}</small>
+              <em className={item.status === "Expirat" || item.status === "Urgent" ? "warn" : ""}>
+                {item.status}
+              </em>
+            </button>
+          ))}
+        </div>
+
+        <div className="dash-actions">
+          <button type="button" className="dash-action" onClick={() => openModal("company")}>
+            + Companie
+          </button>
+          <button type="button" className="dash-action" onClick={() => openModal("candidate")}>
+            + Candidat
+          </button>
+          <button type="button" className="dash-action" onClick={() => go("Alerte & Termene")}>
+            Alerte
+          </button>
+          <button type="button" className="dash-action" onClick={() => go("Companii")}>
+            Companii
+          </button>
+          <span className="dash-actions-meta">
+            {people.length} candidați · {firms.length} companii
+          </span>
+        </div>
+      </section>
     </div>
   );
 }
 
-function DashboardView({ data, go }: { data: IgmData; go: (p: IgmPageName) => void }) {
-  const docs = activeDocs(data);
-  const people = activePeople(data);
-  const exp = docs.filter((x) => x.expiryDate && x.type !== "Pasaport Nepal");
-  const range = (a: number, b: number) =>
-    exp.filter((x) => {
-      const d = daysUntil(x.expiryDate);
-      return d !== null && d >= a && d <= b;
-    }).length;
-  const types = ["Permis de sedere", "Invitatie", "Decizie", "Cazier", "Pasaport Nepal"];
-  const counts = types.map((t) => docs.filter((x) => x.type === t).length);
-  const max = Math.max(1, ...counts);
-  const upcoming = data.submissions
-    .filter((x) => active(x) && x.scheduledDate && x.status !== "Anulat")
-    .sort((a, b) => a.scheduledDate.localeCompare(b.scheduledDate))
-    .slice(0, 6);
-
-  return (
-    <>
-      <div className="igm-metricgrid">
-        <Metric label="Candidați activi" value={people.length} sub="În registrul curent" />
-        <Metric
-          label="Companii"
-          value={activeCompanies(data).length}
-          sub="Manuale + înregistrate"
-        />
-        <Metric
-          label="Dosare IGM"
-          value={data.submissions.filter(active).length}
-          sub={`${data.submissions.filter((x) => active(x) && x.status === "Programat").length} programate`}
-        />
-        <Metric label="Expiră ≤ 30 zile" value={range(-9999, 30)} sub="Necesită atenție" />
-        <Metric label="Expiră 31–60 zile" value={range(31, 60)} sub="Avertizare" />
-        <Metric label="Expiră 61–90 zile" value={range(61, 90)} sub="Monitorizare" />
-      </div>
-      <div className="igm-dash-grid">
-        <div className="card-plain">
-          <h2>Documente pe tip</h2>
-          {types.map((t, i) => (
-            <div className="igm-chartrow" key={t}>
-              <span>{t}</span>
-              <div className="bartrack">
-                <div className="barfill" style={{ width: `${(counts[i] / max) * 100}%` }} />
-              </div>
-              <strong>{counts[i]}</strong>
-            </div>
-          ))}
-        </div>
-        <div className="card-plain">
-          <h2>Calendar operațiuni IGM</h2>
-          {upcoming.length ? (
-            upcoming.map((x) => (
-              <div className="igm-listrow" key={x.id}>
-                <div>
-                  <strong>{fmt(x.scheduledDate)}</strong>
-                  <div className="hint">
-                    {companyName(data, x.companyId)} · {x.type}
-                  </div>
-                </div>
-                <Chip text={x.status || "Programat"} color={x.status === "Depus" ? "green" : "blue"} />
-              </div>
-            ))
-          ) : (
-            <p className="hint">Nu sunt programări înregistrate.</p>
-          )}
-        </div>
-        <div className="card-plain">
-          <h2>Alerte documente</h2>
-          {(
-            [
-              [0, 30, "≤ 30 zile", "red"],
-              [31, 60, "31–60 zile", "yellow"],
-              [61, 90, "61–90 zile", "green"],
-            ] as const
-          ).map(([a, b, t, c]) => (
-            <button
-              key={t}
-              type="button"
-              className={`igm-alertline ${c}`}
-              onClick={() => go("Alerte & Termene")}
-            >
-              <strong>{t}</strong>
-              <span>{range(a, b)} documente →</span>
-            </button>
-          ))}
-        </div>
-      </div>
-    </>
-  );
+function opsList(data: IgmData) {
+  return buildUpcoming(data);
 }
 
-function opsList(data: IgmData) {
+function buildUpcoming(data: IgmData) {
   const list: {
     date: string;
     kind: string;
@@ -491,6 +969,7 @@ function opsList(data: IgmData) {
     status: string;
     page: IgmPageName;
   }[] = [];
+
   data.submissions.filter(active).forEach((x) => {
     if (x.scheduledDate && x.status !== "Anulat" && x.status !== "Depus") {
       list.push({
@@ -502,18 +981,45 @@ function opsList(data: IgmData) {
       });
     }
   });
+
+  data.pickups.filter(active).forEach((x) => {
+    if (x.date) {
+      list.push({
+        date: x.date.slice(0, 10),
+        kind: "Ridicare IGM",
+        detail: `${companyName(data, x.companyId)}${x.notes ? ` · ${x.notes}` : ""}`,
+        status: "Programat",
+        page: "Ridicări de la IGM",
+      });
+    }
+  });
+
   activeDocs(data).forEach((x) => {
     const d = daysUntil(x.expiryDate);
-    if (x.expiryDate && x.type !== "Pasaport Nepal" && d !== null && d <= 30) {
+    if (x.expiryDate && x.type !== "Pasaport Nepal" && d !== null && d <= 45) {
       list.push({
         date: x.expiryDate,
         kind: `Expirare ${x.type}`,
         detail: `${cn(candidateOf(data, x.candidateId))} · ${companyName(data, x.companyId)}`,
-        status: d < 0 ? "Expirat" : "Urgent",
+        status: d < 0 ? "Expirat" : d <= 7 ? "Urgent" : "În termen",
         page: "Alerte & Termene",
       });
     }
   });
+
+  activePeople(data).forEach((c) => {
+    if (!c.pipelineDeadline) return;
+    const d = daysUntil(c.pipelineDeadline);
+    if (d === null || d > 21) return;
+    list.push({
+      date: c.pipelineDeadline.slice(0, 10),
+      kind: "Termen proces",
+      detail: `${cn(c)} · ${shortPipeLabel(inferPipelineStep(data, c))}`,
+      status: d < 0 ? "Întârziat" : d <= 3 ? "Urgent" : "În lucru",
+      page: "Companii",
+    });
+  });
+
   return list.sort((a, b) => a.date.localeCompare(b.date));
 }
 
@@ -720,6 +1226,9 @@ function PeopleView({
   selected,
   setSelected,
   openModal,
+  busy,
+  onUploadFile,
+  onDeleteFile,
   onRestore,
   onMarkSeen,
   unseenArchived,
@@ -731,6 +1240,9 @@ function PeopleView({
   selected: string;
   setSelected: (v: string) => void;
   openModal: (k: ModalKind, id?: string) => void;
+  busy: boolean;
+  onUploadFile: (candidateId: string, file: File, docType: string) => Promise<void>;
+  onDeleteFile: (fileId: number) => Promise<void>;
   onRestore: (id: string) => void;
   onMarkSeen: () => void;
   unseenArchived: number;
@@ -792,6 +1304,9 @@ function PeopleView({
               c={current}
               openModal={openModal}
               onRestore={onRestore}
+              busy={busy}
+              onUploadFile={onUploadFile}
+              onDeleteFile={onDeleteFile}
             />
           ) : (
             <p className="hint">Selectează un candidat.</p>
@@ -807,12 +1322,21 @@ function PersonDetail({
   c,
   openModal,
   onRestore,
+  busy,
+  onUploadFile,
+  onDeleteFile,
 }: {
   data: IgmData;
   c: IgmCandidate;
   openModal: (k: ModalKind, id?: string) => void;
   onRestore: (id: string) => void;
+  busy: boolean;
+  onUploadFile: (candidateId: string, file: File, docType: string) => Promise<void>;
+  onDeleteFile: (fileId: number) => Promise<void>;
 }) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [docType, setDocType] = useState("Contract");
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const docs = data.documents.filter((x) => x.candidateId === c.id && active(x));
   const subs = data.submissions.filter((x) => x.candidateId === c.id && active(x));
   const tr = data.transfers.filter((x) => x.candidateId === c.id);
@@ -861,6 +1385,24 @@ function PersonDetail({
           Motiv: {c.archiveReason || "—"} · Ultima zi: {fmt(c.lastWorkDate)}
         </p>
       ) : null}
+
+      {!c.deletedAt ? (
+        <div style={{ marginBottom: 16 }}>
+          <CandidateDocsPanel
+            data={data}
+            candidateId={c.id}
+            busy={busy}
+            defaultType={docType}
+            onDefaultTypeChange={setDocType}
+            onUpload={(file, type) => onUploadFile(c.id, file, type)}
+            onDeleteFile={onDeleteFile}
+            uploadError={uploadError}
+            setUploadError={setUploadError}
+            fileRef={fileRef}
+          />
+        </div>
+      ) : null}
+
       <h3>Istoricul candidatului</h3>
       <table className="table">
         <thead>
@@ -1434,6 +1976,7 @@ function IgmModal({
   kind,
   editId,
   presetType,
+  presetCompanyId = "",
   data,
   formError,
   busy,
@@ -1443,6 +1986,7 @@ function IgmModal({
   kind: Exclude<ModalKind, null>;
   editId: string;
   presetType: string;
+  presetCompanyId?: string;
   data: IgmData;
   formError: string;
   busy: boolean;
@@ -1473,15 +2017,36 @@ function IgmModal({
     companyEdit: "Modifică companie",
     candidate: "Adaugă candidat",
     candidateEdit: "Modifică candidat",
-    archive: `Arhivează candidat — ${cn(candidate)}`,
+    archive: `Arhivează candidat`,
     transfer: "Transfer candidat",
     document: `Adaugă document`,
     documentEdit: `Modifică document`,
-    submission: "Programează / depune dosar la IGM",
+    submission: "Programează dosar IGM",
     submissionEdit: "Modifică dosar IGM",
     pickup: "Înregistrează ridicare IGM",
     pickupEdit: "Modifică ridicare IGM",
-    batch: "Adaugă caziere — depunere în lot",
+    batch: "Adaugă caziere",
+  };
+
+  const subtitleMap: Record<string, string> = {
+    company: "Denumirea firmei în registru",
+    companyEdit: "Actualizează denumirea",
+    candidate: "Leagă candidatul de o companie",
+    candidateEdit: "Actualizează datele candidatului",
+    archive: cn(candidate) || "Mută candidatul în arhivă",
+    transfer: "Mută candidatul la altă firmă",
+    document: "Companie, candidat și date document",
+    documentEdit: "Actualizează datele documentului",
+    submission: "Programare sau depunere la IGM",
+    submissionEdit: "Actualizează dosarul IGM",
+    pickup: "Ce ridici de la IGM",
+    pickupEdit: "Actualizează ridicarea",
+    batch: "Depunere în lot — companii și candidați",
+  };
+
+  const batchStats = {
+    companies: batchGroups.length,
+    records: batchGroups.reduce((n, g) => n + g.people.length, 0),
   };
 
   function handleSubmit(e: FormEvent<HTMLFormElement>) {
@@ -1522,10 +2087,13 @@ function IgmModal({
 
   return (
     <div className="igm-modalbg" role="dialog" aria-modal="true">
-      <div className="igm-modal">
+      <div className={`igm-modal ${kind === "batch" ? "igm-modal-lg" : ""}`}>
         <div className="igm-modalhead">
-          <h2>{titleMap[kind]}</h2>
-          <button type="button" className="btn btn-ghost" onClick={onClose}>
+          <div>
+            <h2>{titleMap[kind]}</h2>
+            {subtitleMap[kind] ? <p className="igm-modalsub">{subtitleMap[kind]}</p> : null}
+          </div>
+          <button type="button" className="igm-modal-x" onClick={onClose} aria-label="Închide">
             ✕
           </button>
         </div>
@@ -1550,7 +2118,7 @@ function IgmModal({
               {kind === "candidate" ? (
                 <label>
                   Companie
-                  <select name="companyId" defaultValue="">
+                  <select name="companyId" defaultValue={presetCompanyId || ""}>
                     <option value="">Selectează compania</option>
                     {companyOptions.map((c) => (
                       <option key={c.id} value={c.id}>
@@ -1592,11 +2160,11 @@ function IgmModal({
 
           {(kind === "document" || kind === "submission") && !editId && (
             <>
-              <div className="wide igm-group">
-                <strong>Companie</strong>
+              <div className="wide igm-section">
+                <div className="igm-section-label">Companie</div>
                 <div className="igm-formgrid">
-                  <label>
-                    Companie existentă
+                  <label className="wide">
+                    Selectează compania
                     <select name="companyId" defaultValue="">
                       <option value="">Selectează compania</option>
                       {companyOptions.map((c) => (
@@ -1606,38 +2174,37 @@ function IgmModal({
                       ))}
                     </select>
                   </label>
-                  <label>
-                    Sau creează companie nouă
-                    <input name="newCompanyName" />
+                  <label className="wide">
+                    <span className="igm-or">sau creează una nouă</span>
+                    <input name="newCompanyName" placeholder="Nume companie nouă" />
                   </label>
                 </div>
               </div>
-              <div className="wide igm-group">
-                <strong>Candidat</strong>
-                <div className="btn-row" style={{ marginBottom: 8 }}>
-                  <label>
-                    <input
-                      type="radio"
-                      checked={!newMode}
-                      onChange={() => setNewMode(false)}
-                    />{" "}
+              <div className="wide igm-section">
+                <div className="igm-section-label">Candidat</div>
+                <div className="igm-seg">
+                  <button
+                    type="button"
+                    className={!newMode ? "on" : ""}
+                    onClick={() => setNewMode(false)}
+                  >
                     Existent
-                  </label>
-                  <label>
-                    <input
-                      type="radio"
-                      checked={newMode}
-                      onChange={() => {
-                        setNewMode(true);
-                        setPickedCandidate("");
-                      }}
-                    />{" "}
+                  </button>
+                  <button
+                    type="button"
+                    className={newMode ? "on" : ""}
+                    onClick={() => {
+                      setNewMode(true);
+                      setPickedCandidate("");
+                    }}
+                  >
                     Nou
-                  </label>
+                  </button>
                 </div>
                 {!newMode ? (
                   <>
                     <input
+                      className="igm-search"
                       placeholder="Caută după nume…"
                       value={candQuery}
                       onChange={(e) => setCandQuery(e.target.value)}
@@ -1647,7 +2214,7 @@ function IgmModal({
                         <button
                           key={c.id}
                           type="button"
-                          className="igm-pickitem"
+                          className={`igm-pickitem ${pickedCandidate === c.id ? "picked" : ""}`}
                           onClick={() => {
                             setPickedCandidate(c.id);
                             setCandQuery(cn(c));
@@ -1684,9 +2251,10 @@ function IgmModal({
 
           {kind === "transfer" && (
             <>
-              <div className="wide igm-group">
-                <strong>Candidat existent</strong>
+              <div className="wide igm-section">
+                <div className="igm-section-label">Candidat</div>
                 <input
+                  className="igm-search"
                   placeholder="Caută după nume…"
                   value={candQuery}
                   onChange={(e) => setCandQuery(e.target.value)}
@@ -1696,7 +2264,7 @@ function IgmModal({
                     <button
                       key={c.id}
                       type="button"
-                      className="igm-pickitem"
+                      className={`igm-pickitem ${pickedCandidate === c.id ? "picked" : ""}`}
                       onClick={() => {
                         setPickedCandidate(c.id);
                         setCandQuery(cn(c));
@@ -1749,6 +2317,7 @@ function IgmModal({
                 Tip document *
                 <select value={docType} onChange={(e) => setDocType(e.target.value)} required>
                   {[
+                    "Contract",
                     "Invitatie",
                     "Decizie",
                     "Permis de sedere",
@@ -1915,57 +2484,67 @@ function IgmModal({
                 <input name="date" type="date" required defaultValue={pickup?.date || today()} />
               </label>
               {kind === "pickup" ? (
-                <div className="wide">
-                  <h3>Documente ridicate</h3>
+                <div className="wide igm-section">
+                  <div className="igm-section-label">Documente ridicate</div>
                   {pickupItems.map((item, idx) => (
-                    <div className="igm-toolbar" key={idx}>
-                      <select
-                        value={item.type}
-                        onChange={(e) => {
-                          const next = [...pickupItems];
-                          next[idx] = { ...next[idx], type: e.target.value };
-                          setPickupItems(next);
-                        }}
-                      >
-                        {[
-                          "Invitatii",
-                          "Decizii",
-                          "Permise de sedere",
-                          "Pasapoarte",
-                          "Caziere",
-                          "Altele",
-                        ].map((t) => (
-                          <option key={t}>{t}</option>
-                        ))}
-                      </select>
-                      <input
-                        type="number"
-                        min={1}
-                        max={10000}
-                        value={item.quantity}
-                        onChange={(e) => {
-                          const next = [...pickupItems];
-                          next[idx] = { ...next[idx], quantity: Number(e.target.value) };
-                          setPickupItems(next);
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={() => setPickupItems(pickupItems.filter((_, i) => i !== idx))}
-                      >
-                        ✕
-                      </button>
+                    <div className="igm-person-card" key={idx}>
+                      <div className="igm-formgrid">
+                        <label>
+                          Tip
+                          <select
+                            value={item.type}
+                            onChange={(e) => {
+                              const next = [...pickupItems];
+                              next[idx] = { ...next[idx], type: e.target.value };
+                              setPickupItems(next);
+                            }}
+                          >
+                            {[
+                              "Invitatii",
+                              "Decizii",
+                              "Permise de sedere",
+                              "Pasapoarte",
+                              "Caziere",
+                              "Altele",
+                            ].map((t) => (
+                              <option key={t}>{t}</option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Cantitate
+                          <input
+                            type="number"
+                            min={1}
+                            max={10000}
+                            value={item.quantity}
+                            onChange={(e) => {
+                              const next = [...pickupItems];
+                              next[idx] = { ...next[idx], quantity: Number(e.target.value) };
+                              setPickupItems(next);
+                            }}
+                          />
+                        </label>
+                      </div>
+                      {pickupItems.length > 1 ? (
+                        <button
+                          type="button"
+                          className="igm-text-btn danger"
+                          onClick={() => setPickupItems(pickupItems.filter((_, i) => i !== idx))}
+                        >
+                          Șterge
+                        </button>
+                      ) : null}
                     </div>
                   ))}
                   <button
                     type="button"
-                    className="btn btn-ghost"
+                    className="igm-text-btn"
                     onClick={() =>
                       setPickupItems([...pickupItems, { type: "Invitatii", quantity: 1 }])
                     }
                   >
-                    ＋ Tip document
+                    + Tip document
                   </button>
                 </div>
               ) : null}
@@ -1978,17 +2557,16 @@ function IgmModal({
 
           {kind === "batch" && (
             <>
-              <p className="wide hint">
-                Completează o companie și fiecare candidat. Poți adăuga mai multe companii.
-              </p>
+              <div className="wide igm-chips">
+                <span>{batchStats.companies} compani{batchStats.companies === 1 ? "e" : "i"}</span>
+                <span>{batchStats.records} cazier{batchStats.records === 1 ? "" : "e"}</span>
+              </div>
               {batchGroups.map((g, i) => (
-                <div className="wide igm-group" key={i}>
-                  <h3>
-                    Compania {i + 1} · {g.people.length} caziere
-                  </h3>
+                <div className="wide igm-section" key={i}>
+                  <div className="igm-section-label">Companie {i + 1}</div>
                   <div className="igm-formgrid">
-                    <label>
-                      Companie existentă
+                    <label className="wide">
+                      Selectează compania
                       <select
                         value={g.companyId}
                         onChange={(e) => {
@@ -1997,7 +2575,7 @@ function IgmModal({
                           setBatchGroups(next);
                         }}
                       >
-                        <option value="">Selectează</option>
+                        <option value="">Selectează compania</option>
                         {companyOptions.map((c) => (
                           <option key={c.id} value={c.id}>
                             {c.name}
@@ -2005,10 +2583,11 @@ function IgmModal({
                         ))}
                       </select>
                     </label>
-                    <label>
-                      Sau companie nouă
+                    <label className="wide">
+                      <span className="igm-or">sau creează una nouă</span>
                       <input
                         value={g.newCompanyName}
+                        placeholder="Nume companie nouă"
                         onChange={(e) => {
                           const next = [...batchGroups];
                           next[i] = { ...next[i], newCompanyName: e.target.value };
@@ -2017,10 +2596,27 @@ function IgmModal({
                       />
                     </label>
                   </div>
+
                   {g.people.map((p, j) => (
-                    <div className="igm-group" key={j}>
+                    <div className="igm-person-card" key={j}>
+                      <div className="igm-person-card-top">
+                        <strong>Candidat {j + 1}</strong>
+                        {g.people.length > 1 ? (
+                          <button
+                            type="button"
+                            className="igm-text-btn danger"
+                            onClick={() => {
+                              const next = [...batchGroups];
+                              next[i].people = next[i].people.filter((_, idx) => idx !== j);
+                              setBatchGroups(next);
+                            }}
+                          >
+                            Șterge
+                          </button>
+                        ) : null}
+                      </div>
                       <div className="igm-formgrid">
-                        <label>
+                        <label className="wide">
                           Candidat existent
                           <select
                             value={p.candidateId}
@@ -2042,7 +2638,7 @@ function IgmModal({
                           </select>
                         </label>
                         <label>
-                          Prenume nou
+                          Prenume
                           <input
                             value={p.newFirstName}
                             onChange={(e) => {
@@ -2056,7 +2652,7 @@ function IgmModal({
                           />
                         </label>
                         <label>
-                          Nume nou
+                          Nume
                           <input
                             value={p.newLastName}
                             onChange={(e) => {
@@ -2069,7 +2665,7 @@ function IgmModal({
                             }}
                           />
                         </label>
-                        <label>
+                        <label className="wide">
                           Număr cazier
                           <input
                             value={p.number}
@@ -2083,9 +2679,10 @@ function IgmModal({
                       </div>
                     </div>
                   ))}
+
                   <button
                     type="button"
-                    className="btn btn-ghost"
+                    className="igm-text-btn"
                     onClick={() => {
                       const next = [...batchGroups];
                       next[i].people.push({
@@ -2097,13 +2694,14 @@ function IgmModal({
                       setBatchGroups(next);
                     }}
                   >
-                    ＋ Adaugă candidat
+                    + Adaugă candidat
                   </button>
                 </div>
               ))}
+
               <button
                 type="button"
-                className="btn btn-ghost wide"
+                className="btn btn-outline wide"
                 onClick={() =>
                   setBatchGroups([
                     ...batchGroups,
@@ -2117,24 +2715,30 @@ function IgmModal({
                   ])
                 }
               >
-                ＋ Adaugă companie
+                + Adaugă companie
               </button>
-              <label>
-                Data emiterii *
-                <input name="issueDate" type="date" required defaultValue={today()} />
-              </label>
-              <label>
-                Data expirării
-                <input name="expiryDate" type="date" />
-              </label>
-              <label>
-                Alertă (zile)
-                <input name="alertDays" type="number" defaultValue={30} />
-              </label>
-              <label className="wide">
-                Observații
-                <textarea name="notes" />
-              </label>
+
+              <div className="wide igm-section">
+                <div className="igm-section-label">Date lot</div>
+                <div className="igm-formgrid">
+                  <label>
+                    Data emiterii *
+                    <input name="issueDate" type="date" required defaultValue={today()} />
+                  </label>
+                  <label>
+                    Data expirării
+                    <input name="expiryDate" type="date" />
+                  </label>
+                  <label>
+                    Alertă (zile)
+                    <input name="alertDays" type="number" defaultValue={30} />
+                  </label>
+                  <label className="wide">
+                    Observații
+                    <textarea name="notes" />
+                  </label>
+                </div>
+              </div>
             </>
           )}
 
@@ -2149,12 +2753,12 @@ function IgmModal({
             <p className="hint wide">Selectează un candidat din rezultate sau alege „Nou”.</p>
           ) : null}
 
-          <div className="igm-toolbar end wide">
+          <div className="igm-modalfoot wide">
             <button type="button" className="btn btn-ghost" onClick={onClose}>
               Anulează
             </button>
             <button type="submit" className="btn" disabled={busy}>
-              Salvează
+              {kind === "batch" ? "Salvează lotul" : "Salvează"}
             </button>
           </div>
         </form>

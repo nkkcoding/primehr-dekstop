@@ -18,6 +18,22 @@ export interface IgmCandidate {
   deletedAt: string;
   archiveReason: string;
   lastWorkDate: string;
+  pipelineStep?: string;
+  /** ISO timestamp when current pipeline step started — for process SLA only. */
+  pipelineStepAt?: string;
+  /** Explicit process deadline YYYY-MM-DD (not document expiry). */
+  pipelineDeadline?: string;
+}
+
+export interface IgmAuditEntry {
+  id: string;
+  table: string;
+  recordId: string;
+  action: string;
+  before: string;
+  after: string;
+  actor: string;
+  createdAt: string;
 }
 
 export interface IgmDocument {
@@ -108,7 +124,7 @@ export interface IgmData {
   pickups: IgmPickup[];
   pickupItems: IgmPickupItem[];
   transfers: IgmTransfer[];
-  audit: unknown[];
+  audit: IgmAuditEntry[];
   acknowledgements: IgmAck[];
   files: IgmFile[];
 }
@@ -201,16 +217,20 @@ export const IgmApi = {
       formData: fd,
     });
   },
+  deleteFile: (fileId: number) =>
+    api<{ ok: boolean }>(`/files/${fileId}`, { method: "DELETE" }),
   downloadUrl: (fileId: number) =>
     `${getHostBase()}/api/igm/files/${fileId}/download?token=${encodeURIComponent(getStoredToken() || "")}`,
 };
 
 export const IGM_PAGES = [
   "Dashboard",
-  "Calendar IGM",
-  "Căutare globală",
-  "Candidați",
   "Companii",
+  "Candidați",
+  "Alerte & Termene",
+  "Rapoarte",
+  "Căutare globală",
+  "Calendar IGM",
   "Invitații",
   "Decizii",
   "Permise de ședere",
@@ -219,8 +239,6 @@ export const IGM_PAGES = [
   "Dosare la IGM",
   "Ridicări de la IGM",
   "Schimbări candidați",
-  "Alerte & Termene",
-  "Rapoarte",
   "Candidați arhivați",
 ] as const;
 
