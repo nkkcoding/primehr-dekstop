@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { IgmData } from "../../lib/igmApi";
 import { IgmApi } from "../../lib/igmApi";
-import { activeCompanies, cn, companyName } from "./igmHelpers";
+import { active, activeCompanies, cn, companyName, fmt, today } from "./igmHelpers";
 import {
   PIPELINE_STEPS,
   advanceChecklist,
@@ -20,7 +20,15 @@ import {
 } from "./pipeline";
 import type { IgmAuditEntry } from "../../lib/igmApi";
 
-type OpenModal = (kind: "company" | "companyEdit" | "candidate", id?: string) => void;
+const PICKUP_QUICK_TYPES = [
+  "Invitatii",
+  "Decizii",
+  "Permise de sedere",
+  "Pasapoarte",
+  "Caziere",
+] as const;
+
+type OpenModal = (kind: "company" | "companyEdit" | "candidate" | "archive", id?: string) => void;
 
 const UPLOAD_DOC_TYPES = [
   "Contract",
@@ -32,18 +40,29 @@ const UPLOAD_DOC_TYPES = [
   "Alt document",
 ] as const;
 
+const CORE_DOC_STATUS = [
+  "Contract",
+  "Invitatie",
+  "Decizie",
+  "Permis de sedere",
+  "Cazier",
+  "Pasaport Nepal",
+] as const;
+
 export function PipelineCompaniesView({
   data,
   filter,
   setFilter,
   openModal,
   onOpenCompany,
+  onDeleteCompany,
 }: {
   data: IgmData;
   filter: string;
   setFilter: (v: string) => void;
   openModal: OpenModal;
   onOpenCompany: (id: string) => void;
+  onDeleteCompany: (id: string) => void;
 }) {
   const q = filter.trim().toLocaleLowerCase();
   const rows = activeCompanies(data).filter((c) => !q || c.name.toLocaleLowerCase().includes(q));
@@ -70,6 +89,7 @@ export function PipelineCompaniesView({
               <th>În documentare</th>
               <th>La IGM</th>
               <th>De ridicat</th>
+              <th>Acțiuni</th>
             </tr>
           </thead>
           <tbody>
@@ -86,12 +106,28 @@ export function PipelineCompaniesView({
                   <td>{s.documentare}</td>
                   <td>{s.igm}</td>
                   <td>{s.ridicare}</td>
+                  <td className="btn-row" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => openModal("companyEdit", c.id)}
+                    >
+                      Modifică
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={() => onDeleteCompany(c.id)}
+                    >
+                      Șterge
+                    </button>
+                  </td>
                 </tr>
               );
             })}
             {!rows.length ? (
               <tr>
-                <td colSpan={5} className="hint">
+                <td colSpan={6} className="hint">
                   Nicio companie. Adaugă prima firmă ca să începi pipeline-ul.
                 </td>
               </tr>
@@ -109,12 +145,16 @@ export function PipelineCompanyPeopleView({
   openModal,
   onBack,
   onOpenPerson,
+  onDeleteCompany,
+  onArchivePerson,
 }: {
   data: IgmData;
   companyId: string;
   openModal: OpenModal;
   onBack: () => void;
   onOpenPerson: (id: string) => void;
+  onDeleteCompany: (id: string) => void;
+  onArchivePerson: (id: string) => void;
 }) {
   const company = data.companies.find((c) => c.id === companyId);
   const people = data.candidates.filter((c) => !c.deletedAt && c.companyId === companyId);
@@ -122,63 +162,103 @@ export function PipelineCompanyPeopleView({
   return (
     <div className="pipe-view">
       <div className="pipe-crumb">
-        <button type="button" className="pipe-crumb-link" onClick={onBack}>
-          Companii
+        <button type="button" className="igm-back-btn" onClick={onBack}>
+          ← Înapoi la companii
         </button>
-        <span>/</span>
+        <span className="pipe-crumb-sep">/</span>
         <strong>{company?.name || "Companie"}</strong>
       </div>
       <div className="pipe-title-row">
         <div>
           <h1>{company?.name || "Companie"}</h1>
-          <p className="lead">{people.length} candidați activi</p>
+          <p className="lead">{people.length} candidați · priveliște pași</p>
         </div>
-        <button type="button" className="btn" onClick={() => openModal("candidate")}>
-          ＋ Adaugă candidat
-        </button>
+        <div className="btn-row">
+          <button type="button" className="btn" onClick={() => openModal("candidate")}>
+            ＋ Adaugă candidat
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => openModal("companyEdit", companyId)}
+          >
+            Modifică firmă
+          </button>
+          <button
+            type="button"
+            className="btn btn-danger-soft"
+            onClick={() => onDeleteCompany(companyId)}
+            title="Șterge toată firma"
+          >
+            Șterge firmă
+          </button>
+        </div>
       </div>
-      <div className="card-plain pipe-table-card">
-        <table className="table pipe-table">
+      <div className="card-plain pipe-matrix-card">
+        <table className="pipe-matrix">
           <thead>
             <tr>
-              <th>Candidat</th>
-              <th>Pas curent</th>
-              <th>Termen</th>
-              <th>Status</th>
+              <th className="pipe-matrix-name">Candidat</th>
+              {PIPELINE_STEPS.map((s) => (
+                <th key={s}>{shortStep(s)}</th>
+              ))}
             </tr>
           </thead>
           <tbody>
             {people.map((p) => {
-              const step = inferPipelineStep(data, p);
-              const days = stepDeadlineDays(data, p, step);
+              const current = inferPipelineStep(data, p);
+              const curIdx = stepIndex(current);
               return (
-                <tr key={p.id} className="pipe-row-click" onClick={() => onOpenPerson(p.id)}>
-                  <td>
+                <tr key={p.id} className="pipe-matrix-row" onClick={() => onOpenPerson(p.id)}>
+                  <td className="pipe-matrix-name">
                     <button type="button" className="pipe-link" onClick={() => onOpenPerson(p.id)}>
                       {cn(p)}
                     </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger pipe-row-del-btn"
+                      title="Șterge acest candidat"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onArchivePerson(p.id);
+                      }}
+                    >
+                      Șterge candidat
+                    </button>
                   </td>
-                  <td>
-                    <span className="pipe-step-chip">{step}</span>
-                  </td>
-                  <td>{days === null ? "—" : `${days} zile`}</td>
-                  <td>
-                    <span className={`igm-chip ${statusColor(stepStatusLabel(days, step))}`}>
-                      {stepStatusLabel(days, step)}
-                    </span>
-                  </td>
+                  {PIPELINE_STEPS.map((s, i) => {
+                    const state = i < curIdx ? "done" : i === curIdx ? "now" : "todo";
+                    return (
+                      <td key={s} className="pipe-matrix-cell">
+                        <span className={`pipe-matrix-dot ${state}`} title={`${shortStep(s)} · ${state === "done" ? "făcut" : state === "now" ? "curent" : "nu încă"}`}>
+                          {state === "done" ? "✓" : state === "now" ? "●" : ""}
+                        </span>
+                      </td>
+                    );
+                  })}
                 </tr>
               );
             })}
             {!people.length ? (
               <tr>
-                <td colSpan={4} className="hint">
+                <td colSpan={PIPELINE_STEPS.length + 1} className="hint">
                   Niciun candidat la această firmă.
                 </td>
               </tr>
             ) : null}
           </tbody>
         </table>
+        <div className="pipe-matrix-legend" aria-hidden>
+          <span>
+            <i className="pipe-matrix-dot done">✓</i> făcut
+          </span>
+          <span>
+            <i className="pipe-matrix-dot now">●</i> curent
+          </span>
+          <span>
+            <i className="pipe-matrix-dot todo" /> încă nu
+          </span>
+        </div>
       </div>
     </div>
   );
@@ -194,6 +274,8 @@ export function PipelinePersonView({
   onUpload,
   onDeleteFile,
   onSetDeadline,
+  onCreatePickup,
+  onArchive,
   busy,
 }: {
   data: IgmData;
@@ -205,6 +287,13 @@ export function PipelinePersonView({
   onUpload: (file: File, docType: string) => Promise<void>;
   onDeleteFile: (fileId: number) => Promise<void>;
   onSetDeadline: (deadline: string) => void;
+  onCreatePickup: (body: {
+    companyId: string;
+    date: string;
+    notes: string;
+    items: { type: string; quantity: number }[];
+  }) => Promise<void>;
+  onArchive: () => void;
   busy: boolean;
 }) {
   const person = data.candidates.find((c) => c.id === candidateId);
@@ -255,14 +344,14 @@ export function PipelinePersonView({
   return (
     <div className="pipe-view pipe-person">
       <div className="pipe-crumb">
+        <button type="button" className="igm-back-btn" onClick={onBackCompany}>
+          ← Înapoi la {company}
+        </button>
+        <span className="pipe-crumb-sep">/</span>
         <button type="button" className="pipe-crumb-link" onClick={onBackCompanies}>
           Companii
         </button>
-        <span>/</span>
-        <button type="button" className="pipe-crumb-link" onClick={onBackCompany}>
-          {company}
-        </button>
-        <span>/</span>
+        <span className="pipe-crumb-sep">/</span>
         <strong>{cn(person)}</strong>
       </div>
 
@@ -294,11 +383,18 @@ export function PipelinePersonView({
               className="btn"
               disabled={busy || !gate.ok}
               onClick={tryAdvance}
-              title={!gate.ok ? gate.blockers.join("; ") : undefined}
+              title={
+                !gate.ok
+                  ? gate.blockers.join("; ")
+                  : `Ești pe „${shortStep(step)}”. Confirmă pasul și treci la „${shortStep(next)}”.`
+              }
             >
-              Marchează: {shortStep(next)}
+              Confirmă {shortStep(step)} → {shortStep(next)}
             </button>
           ) : null}
+          <button type="button" className="btn btn-danger" disabled={busy} onClick={onArchive}>
+            Șterge candidat
+          </button>
         </div>
       </div>
 
@@ -371,18 +467,33 @@ export function PipelinePersonView({
           </ul>
         </div>
         <div className="pipe-panel">
-          <CandidateDocsPanel
-            data={data}
-            candidateId={person.id}
-            busy={busy}
-            defaultType={docType}
-            onDefaultTypeChange={setDocType}
-            onUpload={onUpload}
-            onDeleteFile={onDeleteFile}
-            uploadError={uploadError}
-            setUploadError={setUploadError}
-            fileRef={fileRef}
-          />
+          {step === "Documentare" ? (
+            <ProcessCalendarPanel
+              deadline={person.pipelineDeadline?.slice(0, 10) || ""}
+              busy={busy}
+              onSetDeadline={onSetDeadline}
+            />
+          ) : step === "Ridicare" ? (
+            <QuickPickupPanel
+              data={data}
+              companyId={person.companyId}
+              busy={busy}
+              onCreatePickup={onCreatePickup}
+            />
+          ) : (
+            <CandidateDocsPanel
+              data={data}
+              candidateId={person.id}
+              busy={busy}
+              defaultType={docType}
+              onDefaultTypeChange={setDocType}
+              onUpload={onUpload}
+              onDeleteFile={onDeleteFile}
+              uploadError={uploadError}
+              setUploadError={setUploadError}
+              fileRef={fileRef}
+            />
+          )}
         </div>
         <div className="pipe-panel">
           <h3>Istoric</h3>
@@ -406,6 +517,212 @@ export function PipelinePersonView({
   );
 }
 
+function ProcessCalendarPanel({
+  deadline,
+  busy,
+  onSetDeadline,
+}: {
+  deadline: string;
+  busy: boolean;
+  onSetDeadline: (deadline: string) => void;
+}) {
+  const [draft, setDraft] = useState(deadline || today());
+
+  useEffect(() => {
+    setDraft(deadline || today());
+  }, [deadline]);
+
+  return (
+    <div className="pipe-cal-panel">
+      <h3>Calendar proces</h3>
+      <p className="hint">
+        La Documentare nu încărcăm fișiere aici — setează doar data-termen pentru acest pas.
+      </p>
+      <input
+        type="date"
+        className="igm-input pipe-cal-input"
+        value={draft}
+        disabled={busy}
+        onChange={(e) => setDraft(e.target.value)}
+      />
+      <div className="pipe-cal-actions">
+        <button
+          type="button"
+          className="btn"
+          disabled={busy || !draft}
+          onClick={() => onSetDeadline(draft)}
+        >
+          Salvează data
+        </button>
+        {deadline ? (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={busy}
+            onClick={() => onSetDeadline("")}
+          >
+            Șterge termen
+          </button>
+        ) : null}
+      </div>
+      {deadline ? (
+        <p className="pipe-cal-set">
+          Termen setat: <strong>{fmt(deadline)}</strong>
+        </p>
+      ) : (
+        <p className="hint">Niciun termen salvat încă.</p>
+      )}
+    </div>
+  );
+}
+
+function QuickPickupPanel({
+  data,
+  companyId,
+  busy,
+  onCreatePickup,
+}: {
+  data: IgmData;
+  companyId: string;
+  busy: boolean;
+  onCreatePickup: (body: {
+    companyId: string;
+    date: string;
+    notes: string;
+    items: { type: string; quantity: number }[];
+  }) => Promise<void>;
+}) {
+  const [date, setDate] = useState(today());
+  const [notes, setNotes] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Record<string, number>>({
+    Invitatii: 0,
+    Decizii: 0,
+    "Permise de sedere": 0,
+    Pasapoarte: 0,
+    Caziere: 0,
+  });
+
+  const recent = data.pickups
+    .filter((p) => active(p) && p.companyId === companyId)
+    .slice(0, 4);
+
+  function toggle(type: string) {
+    setSelected((prev) => ({
+      ...prev,
+      [type]: prev[type] > 0 ? 0 : 1,
+    }));
+  }
+
+  async function submit() {
+    const items = Object.entries(selected)
+      .filter(([, qty]) => qty > 0)
+      .map(([type, quantity]) => ({ type, quantity }));
+    if (!items.length) {
+      setError("Bifează cel puțin un tip (decizie / invitație / permis…).");
+      return;
+    }
+    setError(null);
+    try {
+      await onCreatePickup({ companyId, date, notes, items });
+      setSelected({
+        Invitatii: 0,
+        Decizii: 0,
+        "Permise de sedere": 0,
+        Pasapoarte: 0,
+        Caziere: 0,
+      });
+      setNotes("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Ridicare eșuată");
+    }
+  }
+
+  return (
+    <div className="pipe-pickup-panel">
+      <h3>Ridicare rapidă</h3>
+      <p className="hint">
+        În aceeași zi poți bifa mai multe tipuri pentru firmă — decizie + invitație + permis etc.
+      </p>
+      <label className="pipe-pickup-date">
+        Data ridicării
+        <input
+          type="date"
+          className="igm-input"
+          value={date}
+          disabled={busy}
+          onChange={(e) => setDate(e.target.value)}
+        />
+      </label>
+      <div className="pipe-pickup-types">
+        {PICKUP_QUICK_TYPES.map((type) => {
+          const on = selected[type] > 0;
+          return (
+            <label key={type} className={`pipe-pickup-chip ${on ? "on" : ""}`}>
+              <input
+                type="checkbox"
+                checked={on}
+                disabled={busy}
+                onChange={() => toggle(type)}
+              />
+              <span>{type}</span>
+              {on ? (
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  className="pipe-pickup-qty"
+                  value={selected[type]}
+                  disabled={busy}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) =>
+                    setSelected((prev) => ({
+                      ...prev,
+                      [type]: Math.max(1, Number(e.target.value) || 1),
+                    }))
+                  }
+                />
+              ) : null}
+            </label>
+          );
+        })}
+      </div>
+      <label className="pipe-pickup-notes">
+        Observații
+        <textarea
+          className="igm-input"
+          rows={2}
+          value={notes}
+          disabled={busy}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Opțional"
+        />
+      </label>
+      {error ? <div className="error">{error}</div> : null}
+      <button type="button" className="btn" disabled={busy} onClick={() => void submit()}>
+        Înregistrează ridicarea
+      </button>
+
+      <h3 className="pipe-pickup-recent-title">Ridicări recente firmă</h3>
+      {recent.length ? (
+        <ul className="pipe-pickup-recent">
+          {recent.map((p) => {
+            const items = data.pickupItems.filter((i) => i.pickupId === p.id);
+            return (
+              <li key={p.id}>
+                <strong>{fmt(p.date)}</strong>
+                <small>{items.map((i) => `${i.type}×${i.quantity}`).join(" · ") || "—"}</small>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="hint">Nicio ridicare încă pentru această firmă.</p>
+      )}
+    </div>
+  );
+}
+
 /** Attach / list / download files for a candidate — shared by pipeline + Candidați. */
 export function CandidateDocsPanel({
   data,
@@ -415,6 +732,7 @@ export function CandidateDocsPanel({
   onDefaultTypeChange,
   onUpload,
   onDeleteFile,
+  onAddDetailed,
   uploadError,
   setUploadError,
   fileRef,
@@ -427,6 +745,7 @@ export function CandidateDocsPanel({
   onDefaultTypeChange: (v: string) => void;
   onUpload: (file: File, docType: string) => Promise<void>;
   onDeleteFile?: (fileId: number) => Promise<void>;
+  onAddDetailed?: (type: string) => void;
   uploadError: string | null;
   setUploadError: (v: string | null) => void;
   fileRef: RefObject<HTMLInputElement>;
@@ -434,6 +753,17 @@ export function CandidateDocsPanel({
 }) {
   const docs = candidateDocs(data, candidateId);
   const files = data.files.filter((f) => docs.some((d) => d.id === f.documentId));
+
+  const statusRows = CORE_DOC_STATUS.map((type) => {
+    const typed = docs.filter((d) => d.type === type);
+    const withFile = typed.filter((d) => files.some((f) => f.documentId === d.id));
+    const latest = typed[0];
+    let state: "ok" | "partial" | "miss" = "miss";
+    if (withFile.length) state = "ok";
+    else if (typed.length) state = "partial";
+    return { type, state, latest, count: typed.length };
+  });
+  const doneCount = statusRows.filter((r) => r.state === "ok").length;
 
   async function handleFiles(list: FileList | null) {
     if (!list?.length) return;
@@ -462,24 +792,83 @@ export function CandidateDocsPanel({
     <>
       <h3>{title}</h3>
       <p className="hint pipe-doc-hint">
-        Alege tipul (contract, invitație, decizie, permis…) și atașează scanarea. Vizibil pentru toți pe
-        host.
+        Status pe tipuri — ce e depus vs ce lipsește. Adaugă cu detalii (număr, firmă) ca să se
+        sincronizeze în Invitații / Permise / Decizii.
       </p>
+
+      <div className="pipe-doc-status">
+        <div className="pipe-doc-status-head">
+          <strong>Situație dosar</strong>
+          <span>
+            {doneCount}/{statusRows.length} cu fișier
+          </span>
+        </div>
+        <ul className="pipe-doc-status-list">
+          {statusRows.map((row) => (
+            <li key={row.type} className={`pipe-doc-status-item ${row.state}`}>
+              <button
+                type="button"
+                className="pipe-doc-status-btn"
+                onClick={() => {
+                  onDefaultTypeChange(row.type);
+                  if (row.state !== "ok" && onAddDetailed) onAddDetailed(row.type);
+                }}
+                title={
+                  row.state === "ok"
+                    ? "Depus"
+                    : row.state === "partial"
+                      ? "Înregistrat, fără fișier"
+                      : "Lipsește — adaugă detalii"
+                }
+              >
+                <span className="pipe-doc-status-mark" aria-hidden>
+                  {row.state === "ok" ? "✓" : row.state === "partial" ? "·" : "–"}
+                </span>
+                <span className="pipe-doc-status-label">{row.type}</span>
+                <em>
+                  {row.state === "ok"
+                    ? row.latest?.number
+                      ? `Depus · ${row.latest.number}`
+                      : "Depus"
+                    : row.state === "partial"
+                      ? row.latest?.number
+                        ? `Fără fișier · ${row.latest.number}`
+                        : "Fără fișier"
+                      : "Lipsă"}
+                </em>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+
       <div className="pipe-upload">
-        <label>
-          Tip document
-          <select
-            className="igm-input"
-            value={defaultType}
-            onChange={(e) => onDefaultTypeChange(e.target.value)}
-          >
-            {UPLOAD_DOC_TYPES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="pipe-upload-top">
+          <label>
+            Tip document
+            <select
+              className="igm-input"
+              value={defaultType}
+              onChange={(e) => onDefaultTypeChange(e.target.value)}
+            >
+              {UPLOAD_DOC_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </label>
+          {onAddDetailed ? (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              onClick={() => onAddDetailed(defaultType)}
+            >
+              ＋ Detalii ({defaultType})
+            </button>
+          ) : null}
+        </div>
         <input
           ref={fileRef}
           type="file"
@@ -488,7 +877,7 @@ export function CandidateDocsPanel({
           disabled={busy}
           onChange={(e) => void handleFiles(e.target.files)}
         />
-        <p className="hint">PDF, PNG, JPG, DOC, DOCX, XLS, XLSX</p>
+        <p className="hint">Scan rapid: PDF, PNG, JPG… Pentru număr / expirare folosește „Detalii”.</p>
         {uploadError ? <div className="error">{uploadError}</div> : null}
       </div>
 
@@ -497,7 +886,10 @@ export function CandidateDocsPanel({
           {files.map((f) => {
             const doc = docs.find((d) => d.id === f.documentId);
             return (
-              <li key={f.id}>
+              <li key={f.id} className="has-file">
+                <span className="pipe-doc-state ok" aria-hidden>
+                  ✓
+                </span>
                 <a
                   className="pipe-doc-link"
                   href={IgmApi.downloadUrl(f.id)}
@@ -506,7 +898,10 @@ export function CandidateDocsPanel({
                 >
                   {f.originalName}
                 </a>
-                <span className="pipe-doc-meta">{doc?.type || "Document"}</span>
+                <span className="pipe-doc-meta">
+                  {doc?.type || "Document"}
+                  {doc?.number ? ` · ${doc.number}` : ""}
+                </span>
                 {onDeleteFile ? (
                   <button
                     type="button"
@@ -523,12 +918,15 @@ export function CandidateDocsPanel({
           {docs
             .filter((d) => !files.some((f) => f.documentId === d.id))
             .map((d) => (
-              <li key={d.id}>
+              <li key={d.id} className="no-file">
+                <span className="pipe-doc-state partial" aria-hidden>
+                  !
+                </span>
                 <span className="pipe-doc-link">
                   {d.type}
                   {d.number ? ` · ${d.number}` : ""}
                 </span>
-                <span className="pipe-doc-meta">fără fișier</span>
+                <span className="pipe-doc-meta">înregistrat, fără fișier</span>
               </li>
             ))}
         </ul>

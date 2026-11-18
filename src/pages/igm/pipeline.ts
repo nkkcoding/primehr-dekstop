@@ -51,15 +51,15 @@ const DONE: Record<PipelineStep, string[]> = {
     "Cererea firmei a fost înregistrată.",
     "Candidatul a sosit în Moldova.",
     "Contractul de muncă a fost semnat.",
-    "Documentarea este în curs.",
+    "Pasul de documentare rulează pe termen de proces.",
   ],
   Depunere: [
-    "Documentarea de bază este pregătită.",
+    "Termenul de proces a fost setat.",
     "Dosarul este pregătit pentru depunere la IGM.",
   ],
   Ridicare: [
     "Dosarul a fost depus la IGM.",
-    "Se așteaptă ridicarea documentelor.",
+    "Se așteaptă ridicarea documentelor (poate fi multiplă).",
   ],
   Finalizat: [
     "Toți pașii operaționali sunt închiși.",
@@ -71,9 +71,9 @@ const NEXT: Record<PipelineStep, string[]> = {
   "Cerere firmă": ["Confirmă sosirea în Moldova.", "Leagă candidatul de firmă."],
   "Sosire Moldova": ["Semnează contractul cu firma.", "Încarcă contractul pe dosar."],
   "Contract semnat": ["Încarcă pașaportul.", "Pornește documentarea (termen proces)."],
-  Documentare: ["Pregătește dosarul.", "Depune invitație / decizie / permis."],
+  Documentare: ["Setează termenul de proces pe calendar.", "Apoi treci la depunere."],
   Depunere: ["Urmărește statusul la IGM.", "Programează ridicarea."],
-  Ridicare: ["Ridică documentele.", "Marchează dosarul ca finalizat."],
+  Ridicare: ["Bifează ce ridici azi (decizie / invitație / permis).", "Marchează dosarul ca finalizat."],
   Finalizat: ["Nicio acțiune operațională rămasă."],
 };
 
@@ -197,9 +197,19 @@ export function advanceChecklist(data: IgmData, c: IgmCandidate, step: PipelineS
   }
   if (step === "Documentare") {
     items.push({
-      id: "docs",
-      label: "Cel puțin un document pe dosar",
-      ok: hasAnyFile(data, c.id),
+      id: "deadline",
+      label: "Termen proces setat pe calendar",
+      ok: Boolean(c.pipelineDeadline),
+    });
+  }
+  if (step === "Ridicare") {
+    const hasPickup = data.pickups.some(
+      (p) => active(p) && p.companyId === c.companyId,
+    );
+    items.push({
+      id: "pickup",
+      label: "Cel puțin o ridicare înregistrată pentru firmă",
+      ok: hasPickup,
     });
   }
   return items;
@@ -232,9 +242,13 @@ export function companyStats(data: IgmData, companyId: string) {
     igm: 0,
     ridicare: 0,
     late: 0,
+    done: 0,
+    active: 0,
   };
   for (const p of people) {
     const step = inferPipelineStep(data, p);
+    if (step === "Finalizat") counts.done += 1;
+    else counts.active += 1;
     if (step === "Documentare") counts.documentare += 1;
     if (step === "Depunere") counts.igm += 1;
     if (step === "Ridicare") counts.ridicare += 1;
@@ -242,6 +256,17 @@ export function companyStats(data: IgmData, companyId: string) {
     if (days !== null && days < 0) counts.late += 1;
   }
   return counts;
+}
+
+/** Short status for company cards on Dashboard. */
+export function companyStatusCaption(st: ReturnType<typeof companyStats>): string {
+  if (!st.total) return "fără candidați";
+  if (st.done === st.total) return "Completat";
+  if (st.late) return `${st.late} întârziați`;
+  if (st.ridicare) return `${st.ridicare} de ridicat`;
+  if (st.igm) return `${st.igm} la IGM`;
+  if (st.documentare) return `${st.documentare} documentare`;
+  return "În lucru";
 }
 
 /** Candidates whose process SLA is overdue. */
