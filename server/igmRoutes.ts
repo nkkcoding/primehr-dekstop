@@ -320,13 +320,18 @@ export function createIgmRouter(): Router {
     try {
       const candidateId = String(req.body?.candidateId || "").trim();
       const to = String(req.body?.toCompanyId || "").trim();
-      requireActiveCompany(to);
+      // Empty `to` = scoate la Neatribuită (fără firmă).
+      if (to) requireActiveCompany(to);
       const effectiveDate = igmDate(req.body?.effectiveDate);
       const notes = igmText(req.body?.notes, 1000);
       const c = requireCandidate(candidateId);
       if (c.deleted_at) throw new IgmError("Candidatul este arhivat.");
       const from = String(c.company_id || "");
-      if (from === to) throw new IgmError("Candidatul este deja la această companie.");
+      if (from === to) {
+        throw new IgmError(
+          to ? "Candidatul este deja la această companie." : "Candidatul este deja neatribuit.",
+        );
+      }
       const id = igmId("TRF");
       const createdAt = stampNow();
       const changedBy = igmText(req.user!.username || req.user!.displayName || req.user!.role, 100);

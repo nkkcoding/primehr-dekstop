@@ -432,7 +432,7 @@ export function documentFields(v: Record<string, unknown>): {
     expiryDate: expiry,
     alertDays: passport ? "" : alertRaw,
     notes: igmText(v.notes, 1000),
-    trackingNumber: passport ? igmRequired(v.trackingNumber, 120) : "",
+    trackingNumber: passport ? igmText(v.trackingNumber, 120) : "",
     sentDate,
     deliveryDate,
   };

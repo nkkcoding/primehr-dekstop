@@ -23,7 +23,7 @@ import {
   companyStatusCaption,
   delayedProcessPeople,
   inferPipelineStep,
-  urgentProcessPeople,
+  todoCompaniesNow,
   type PipelineStep,
 } from "./pipeline";
 import {
@@ -60,6 +60,11 @@ type ModalKind =
   | "pickupEdit"
   | "batch";
 
+type FocusHit = {
+  kind: "candidate" | "company" | "document" | "submission";
+  id: string;
+};
+
 const emptyData = (): IgmData => ({
   companies: [],
   candidates: [],
@@ -88,6 +93,7 @@ export default function IgmPage() {
   });
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState("");
+  const [focusHit, setFocusHit] = useState<FocusHit | null>(null);
   const [globalQuery, setGlobalQuery] = useState("");
   const [calendarMonth, setCalendarMonth] = useState(today().slice(0, 7));
   const [error, setError] = useState<string | null>(null);
@@ -134,12 +140,48 @@ export default function IgmPage() {
       setPage(next);
       setFilter("");
       setSelected("");
+      setFocusHit(null);
       setPipeCompanyId("");
       setPipeCandidateId("");
       writeNavUrl(next, "", "");
     },
     [writeNavUrl],
   );
+
+  const goFocus = useCallback(
+    (next: IgmPageName, hit: FocusHit) => {
+      setFilter("");
+      setFocusHit(hit);
+      if (hit.kind === "company") {
+        setPage("Companii");
+        setSelected("");
+        setPipeCompanyId(hit.id);
+        setPipeCandidateId("");
+        writeNavUrl("Companii", hit.id, "");
+        return;
+      }
+      if (hit.kind === "candidate") {
+        setPage(next);
+        setSelected(hit.id);
+        setPipeCompanyId("");
+        setPipeCandidateId("");
+        writeNavUrl(next, "", "");
+        return;
+      }
+      setPage(next);
+      setSelected("");
+      setPipeCompanyId("");
+      setPipeCandidateId("");
+      writeNavUrl(next, "", "");
+    },
+    [writeNavUrl],
+  );
+
+  useEffect(() => {
+    if (!focusHit) return;
+    const t = window.setTimeout(() => setFocusHit(null), 8000);
+    return () => window.clearTimeout(t);
+  }, [focusHit]);
 
   useEffect(() => {
     localStorage.setItem("primehr_more_nav", showMoreNav ? "1" : "0");
@@ -517,7 +559,12 @@ export default function IgmPage() {
             />
           ) : null}
           {page === "Căutare globală" ? (
-            <GlobalSearchView data={data} query={globalQuery} setQuery={setGlobalQuery} go={goPage} />
+            <GlobalSearchView
+              data={data}
+              query={globalQuery}
+              setQuery={setGlobalQuery}
+              goFocus={goFocus}
+            />
           ) : null}
           {page === "Candidați" || page === "Candidați arhivați" ? (
             <PeopleView
@@ -526,7 +573,11 @@ export default function IgmPage() {
               filter={filter}
               setFilter={setFilter}
               selected={selected}
-              setSelected={setSelected}
+              setSelected={(id) => {
+                setFocusHit(null);
+                setSelected(id);
+              }}
+              focusId={focusHit?.kind === "candidate" ? focusHit.id : ""}
               openModal={openModal}
               busy={busy}
               onUploadFile={(id, file, type) => uploadCandidateFile(id, file, type)}
@@ -535,6 +586,20 @@ export default function IgmPage() {
                 if (window.confirm("Reactivăm candidatul în registru?")) {
                   void run(() => IgmApi.restoreCandidate(id));
                 }
+              }}
+              onAssignToCompany={async (ids, companyId) => {
+                await run(async () => {
+                  for (const id of ids) {
+                    const person = data.candidates.find((c) => c.id === id);
+                    if (!person || person.companyId === companyId) continue;
+                    await IgmApi.transfer({
+                      candidateId: id,
+                      toCompanyId: companyId,
+                      effectiveDate: today(),
+                      notes: companyId ? "Atribuire lot" : "Scoatere la Neatribuită",
+                    });
+                  }
+                });
               }}
               onMarkSeen={() => void markAllSeen("archived")}
               unseenArchived={archivedUnseen}
@@ -650,6 +715,7 @@ export default function IgmPage() {
               page={page}
               filter={filter}
               setFilter={setFilter}
+              focusId={focusHit?.kind === "document" ? focusHit.id : ""}
               openModal={openModal}
               softDelete={softDelete}
               onUpload={async (docId, file) => {
@@ -662,6 +728,7 @@ export default function IgmPage() {
               data={data}
               filter={filter}
               setFilter={setFilter}
+              focusId={focusHit?.kind === "submission" ? focusHit.id : ""}
               openModal={openModal}
               softDelete={softDelete}
             />
@@ -902,7 +969,6 @@ function DashboardView({
   openModal: (kind: ModalKind, id?: string) => void;
 }) {
   const late = delayedProcessPeople(data);
-  const soon = urgentProcessPeople(data);
   const people = activePeople(data);
   const firms = activeCompanies(data);
   const expDocs = activeDocs(data).filter((x) => {
@@ -918,25 +984,7 @@ function DashboardView({
   const hotStep =
     stepCounts.slice(0, -1).sort((a, b) => b.count - a.count)[0]?.step || "Documentare";
 
-  const todoRows = [
-    ...late.map((x) => ({ ...x, kind: "late" as const })),
-    ...soon
-      .filter((s) => !late.some((l) => l.c.id === s.c.id))
-      .map((x) => ({ ...x, kind: "urgent" as const })),
-    ...people
-      .filter(
-        (c) =>
-          !late.some((l) => l.c.id === c.id) &&
-          !soon.some((s) => s.c.id === c.id) &&
-          inferPipelineStep(data, c) !== "Finalizat",
-      )
-      .map((c) => ({
-        c,
-        step: inferPipelineStep(data, c),
-        days: null as number | null,
-        kind: "work" as const,
-      })),
-  ].slice(0, 8);
+  const todoRows = todoCompaniesNow(data).slice(0, 8);
 
   const companyRows = firms
     .map((f) => {
@@ -1059,20 +1107,22 @@ function DashboardView({
             </span>
           </div>
           {todoRows.length ? (
-            todoRows.map(({ c, step, kind }) => (
+            todoRows.map(({ f, step, kind, active, late: lateN }) => (
               <button
-                key={c.id}
+                key={f.id}
                 type="button"
                 className={`dash-check-item ${kind}`}
-                onClick={() => openCompany(c.companyId, c.id)}
+                onClick={() => openCompany(f.id)}
               >
                 <span className="dash-check-mark" aria-hidden>
                   {kind === "late" ? "!" : kind === "urgent" ? "•" : "○"}
                 </span>
                 <div>
-                  <strong>{cn(c)}</strong>
+                  <strong>{f.name}</strong>
                   <small>
-                    {companyName(data, c.companyId)} · {shortPipeLabel(step)}
+                    {active} {active === 1 ? "candidat" : "candidați"} cu contract ·{" "}
+                    {shortPipeLabel(step)}
+                    {lateN ? ` · ${lateN} întârziați` : ""}
                   </small>
                 </div>
                 <StatusPill
@@ -1082,7 +1132,7 @@ function DashboardView({
               </button>
             ))
           ) : (
-            <p className="dash-empty">Nimic urgent. Bun.</p>
+            <p className="dash-empty">Nicio firmă cu contracte semnate în lucru.</p>
           )}
         </div>
 
@@ -1358,107 +1408,244 @@ function CalendarView({
   );
 }
 
+type SearchKind = "candidate" | "company" | "document" | "submission";
+
+type SearchRow = {
+  kind: SearchKind;
+  title: string;
+  detail: string;
+  page: IgmPageName;
+  focus: FocusHit;
+  score: number;
+};
+
+function searchScore(haystack: string, terms: string[]): number | null {
+  const n = normSearch(haystack);
+  if (!terms.every((t) => n.includes(t))) return null;
+  const joined = terms.join(" ");
+  let score = 0;
+  if (n === joined) score += 100;
+  else if (n.startsWith(joined)) score += 70;
+  for (const t of terms) {
+    if (n === t) score += 40;
+    else if (n.startsWith(t)) score += 25;
+    else if (n.split(/\s+/).some((w) => w.startsWith(t))) score += 15;
+    else score += 5;
+  }
+  score -= Math.min(n.length, 40) * 0.05;
+  return score;
+}
+
 function GlobalSearchView({
   data,
   query,
   setQuery,
-  go,
+  goFocus,
 }: {
   data: IgmData;
   query: string;
   setQuery: (q: string) => void;
-  go: (p: IgmPageName) => void;
+  goFocus: (page: IgmPageName, hit: FocusHit) => void;
 }) {
-  const q = normSearch(query.trim());
-  const terms = q.split(/\s+/).filter(Boolean);
-  const hit = (x: string) => terms.every((t) => normSearch(x).includes(t));
-  const rows: [string, string, string, IgmPageName][] = [];
-  if (q) {
+  const [kindFilter, setKindFilter] = useState<"all" | SearchKind>("all");
+  const raw = query.trim();
+  const q = normSearch(raw);
+  const ready = q.length >= 2;
+
+  const rows = useMemo(() => {
+    if (!ready) return [] as SearchRow[];
+    const terms = q.split(/\s+/).filter(Boolean);
+    const out: SearchRow[] = [];
+
     activePeople(data).forEach((c) => {
-      if (hit(`${cn(c)} ${c.id} ${companyName(data, c.companyId)}`)) {
-        rows.push(["Candidat", cn(c), companyName(data, c.companyId), "Candidați"]);
-      }
+      const title = cn(c);
+      const detail = companyName(data, c.companyId);
+      const score = searchScore(`${title} ${c.id} ${detail}`, terms);
+      if (score === null) return;
+      out.push({
+        kind: "candidate",
+        title,
+        detail,
+        page: "Candidați",
+        focus: { kind: "candidate", id: c.id },
+        score,
+      });
     });
+
     activeCompanies(data).forEach((c) => {
-      if (hit(`${c.name} ${c.id}`)) rows.push(["Companie", c.name, c.id, "Companii"]);
+      const score = searchScore(`${c.name} ${c.id}`, terms);
+      if (score === null) return;
+      out.push({
+        kind: "company",
+        title: c.name,
+        detail: c.id,
+        page: "Companii",
+        focus: { kind: "company", id: c.id },
+        score,
+      });
     });
+
     activeDocs(data).forEach((d) => {
-      if (
-        hit(
-          `${cn(candidateOf(data, d.candidateId))} ${companyName(data, d.companyId)} ${d.number} ${d.trackingNumber} ${d.type}`,
-        )
-      ) {
-        const section =
-          (Object.entries(DOC_TYPE_BY_PAGE).find(([, t]) => t === d.type)?.[0] as IgmPageName) ||
-          "Candidați";
-        rows.push([
-          "Document",
-          `${d.type} · ${d.number || "Fără număr"}`,
-          `${cn(candidateOf(data, d.candidateId))} · ${companyName(data, d.companyId)}`,
-          section,
-        ]);
-      }
+      const person = cn(candidateOf(data, d.candidateId));
+      const company = companyName(data, d.companyId);
+      const docLine = `${d.type} · ${d.number || "Fără număr"}`;
+      const score = searchScore(
+        `${person} ${company} ${d.number} ${d.trackingNumber} ${d.type}`,
+        terms,
+      );
+      if (score === null) return;
+      const section =
+        (Object.entries(DOC_TYPE_BY_PAGE).find(([, t]) => t === d.type)?.[0] as IgmPageName) ||
+        "Candidați";
+      out.push({
+        kind: "document",
+        title: person,
+        detail: `${docLine} · ${company}`,
+        page: section,
+        focus: { kind: "document", id: d.id },
+        score,
+      });
     });
+
     data.submissions.filter(active).forEach((x) => {
-      if (
-        hit(
-          `${cn(candidateOf(data, x.candidateId))} ${companyName(data, x.companyId)} ${x.type} ${x.number}`,
-        )
-      ) {
-        rows.push([
-          "Dosar IGM",
-          x.type,
-          `${cn(candidateOf(data, x.candidateId))} · ${companyName(data, x.companyId)}`,
-          "Dosare la IGM",
-        ]);
-      }
+      const person = cn(candidateOf(data, x.candidateId));
+      const company = companyName(data, x.companyId);
+      const score = searchScore(`${person} ${company} ${x.type} ${x.number}`, terms);
+      if (score === null) return;
+      out.push({
+        kind: "submission",
+        title: x.type,
+        detail: `${person} · ${company}`,
+        page: "Dosare la IGM",
+        focus: { kind: "submission", id: x.id },
+        score,
+      });
     });
+
+    out.sort((a, b) => b.score - a.score || a.title.localeCompare(b.title, "ro"));
+    return out;
+  }, [data, ready, q]);
+
+  const counts = useMemo(() => {
+    const c = { all: rows.length, candidate: 0, company: 0, document: 0, submission: 0 };
+    for (const r of rows) c[r.kind] += 1;
+    return c;
+  }, [rows]);
+
+  const visible = kindFilter === "all" ? rows : rows.filter((r) => r.kind === kindFilter);
+  const groups: { kind: SearchKind; label: string; items: SearchRow[] }[] = [
+    { kind: "candidate", label: "Candidați", items: [] },
+    { kind: "document", label: "Documente", items: [] },
+    { kind: "company", label: "Companii", items: [] },
+    { kind: "submission", label: "Dosare IGM", items: [] },
+  ];
+  for (const r of visible.slice(0, 120)) {
+    const g = groups.find((x) => x.kind === r.kind);
+    if (g) g.items.push(r);
   }
+  const shownGroups = groups.filter((g) => g.items.length);
+
+  const chips: { id: "all" | SearchKind; label: string; count: number }[] = [
+    { id: "all", label: "Toate", count: counts.all },
+    { id: "candidate", label: "Candidați", count: counts.candidate },
+    { id: "document", label: "Documente", count: counts.document },
+    { id: "company", label: "Companii", count: counts.company },
+    { id: "submission", label: "Dosare IGM", count: counts.submission },
+  ];
 
   return (
-    <div className="card-plain">
+    <div className="card-plain search-board">
       <h2>Căutare globală</h2>
       <input
         className="igm-input"
         placeholder="Nume, prenume, companie, număr document, UPS…"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
+        autoFocus
       />
-      {!q ? (
-        <p className="hint">Introdu cel puțin un cuvânt pentru a căuta în registru.</p>
+      {!raw ? (
+        <p className="hint">Minim 2 caractere · rezultatele apar grupate pe tip.</p>
+      ) : !ready ? (
+        <p className="hint">Mai scrie încă un caracter ca să pornească căutarea.</p>
       ) : (
         <>
+          <div className="search-chips" role="tablist" aria-label="Filtre tip">
+            {chips.map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                role="tab"
+                aria-selected={kindFilter === chip.id}
+                className={`search-chip ${kindFilter === chip.id ? "on" : ""}`}
+                onClick={() => setKindFilter(chip.id)}
+              >
+                {chip.label} <em>({chip.count})</em>
+              </button>
+            ))}
+          </div>
           <p className="hint">
-            {rows.length} rezultate{rows.length > 100 ? " (primele 100)" : ""}
+            {visible.length} rezultate
+            {visible.length > 120 ? " (primele 120)" : ""} · sortate după relevanță
           </p>
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Tip</th>
-                <th>Rezultat</th>
-                <th>Detalii</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.slice(0, 100).map((r, i) => (
-                <tr key={i}>
-                  <td>{r[0]}</td>
-                  <td>{r[1]}</td>
-                  <td>{r[2]}</td>
-                  <td>
-                    <button type="button" className="btn btn-ghost" onClick={() => go(r[3])}>
-                      Vezi
-                    </button>
-                  </td>
-                </tr>
+          {shownGroups.length ? (
+            <div className="search-groups">
+              {shownGroups.map((g) => (
+                <section key={g.kind} className="search-group">
+                  <header className="search-group-head">
+                    <strong>
+                      {g.label} · {g.items.length}
+                    </strong>
+                  </header>
+                  <ul className="search-list">
+                    {g.items.map((r) => (
+                      <li key={`${r.focus.kind}-${r.focus.id}`}>
+                        <div className="search-hit">
+                          <div>
+                            <strong>{r.title}</strong>
+                            <small>{r.detail}</small>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            onClick={() => goFocus(r.page, r.focus)}
+                          >
+                            Vezi
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
               ))}
-            </tbody>
-          </table>
+            </div>
+          ) : (
+            <p className="hint">Niciun rezultat pentru filtrul selectat.</p>
+          )}
         </>
       )}
     </div>
   );
+}
+
+const PEOPLE_DOC_COLS: { type: string; short: string }[] = [
+  { type: "Contract", short: "Contr" },
+  { type: "Invitatie", short: "Inv" },
+  { type: "Decizie", short: "Dec" },
+  { type: "Permis de sedere", short: "Perm" },
+  { type: "Cazier", short: "Caz" },
+  { type: "Pasaport Nepal", short: "Pas" },
+];
+
+function personDocState(
+  data: IgmData,
+  candidateId: string,
+  type: string,
+): "ok" | "partial" | "miss" {
+  const docs = data.documents.filter((d) => active(d) && d.candidateId === candidateId && d.type === type);
+  if (!docs.length) return "miss";
+  const ids = new Set(docs.map((d) => d.id));
+  if (data.files.some((f) => ids.has(f.documentId))) return "ok";
+  return "partial";
 }
 
 function PeopleView({
@@ -1468,11 +1655,13 @@ function PeopleView({
   setFilter,
   selected,
   setSelected,
+  focusId,
   openModal,
   busy,
   onUploadFile,
   onDeleteFile,
   onRestore,
+  onAssignToCompany,
   onMarkSeen,
   unseenArchived,
 }: {
@@ -1482,11 +1671,13 @@ function PeopleView({
   setFilter: (v: string) => void;
   selected: string;
   setSelected: (v: string) => void;
+  focusId: string;
   openModal: (k: ModalKind, id?: string, type?: string, candidateId?: string) => void;
   busy: boolean;
   onUploadFile: (candidateId: string, file: File, docType: string) => Promise<void>;
   onDeleteFile: (fileId: number) => Promise<void>;
   onRestore: (id: string) => void;
+  onAssignToCompany: (ids: string[], companyId: string) => Promise<void>;
   onMarkSeen: () => void;
   unseenArchived: number;
 }) {
@@ -1495,67 +1686,358 @@ function PeopleView({
       !!c.deletedAt === archived &&
       matchFilter(filter, cn(c), companyName(data, c.companyId), c.id),
   );
-  const current = arr.find((x) => x.id === selected) || arr[0];
+  const current = arr.find((x) => x.id === selected) || (archived ? arr[0] : undefined);
 
-  return (
-    <>
-      {archived ? (
+  const [picked, setPicked] = useState<string[]>([]);
+  const [assignCo, setAssignCo] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  const [openCos, setOpenCos] = useState<string[]>([]);
+  const peopInit = useRef(false);
+
+  const companyGroups = useMemo(() => {
+    if (archived) return [];
+    const map = new Map<string, IgmCandidate[]>();
+    for (const c of arr) {
+      const key = c.companyId || "__none__";
+      const list = map.get(key) || [];
+      list.push(c);
+      map.set(key, list);
+    }
+    return Array.from(map.entries())
+      .map(([key, items]) => ({
+        key,
+        label: key === "__none__" ? "Neatribuită" : companyName(data, key),
+        items: items.sort((a, b) => cn(a).localeCompare(cn(b), "ro")),
+      }))
+      .sort((a, b) => {
+        if (a.key === "__none__") return -1;
+        if (b.key === "__none__") return 1;
+        return a.label.localeCompare(b.label, "ro");
+      });
+  }, [arr, archived, data]);
+
+  useEffect(() => {
+    if (archived) return;
+    setOpenCos((prev) => {
+      const still = prev.filter((k) => companyGroups.some((g) => g.key === k));
+      if (still.length) return still;
+      if (!peopInit.current && companyGroups[0]) {
+        peopInit.current = true;
+        return [companyGroups[0].key];
+      }
+      return still;
+    });
+  }, [archived, companyGroups]);
+
+  useEffect(() => {
+    if (!focusId) return;
+    const person = data.candidates.find((c) => c.id === focusId);
+    if (person) {
+      const key = person.companyId || "__none__";
+      setShowAll(false);
+      setOpenCos((prev) => (prev.includes(key) ? prev : [...prev, key]));
+      setSelected(focusId);
+    }
+    const t = window.setTimeout(() => {
+      document
+        .querySelector(`[data-person-id="${focusId}"]`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [focusId, data.candidates, setSelected]);
+
+  function toggleCo(key: string) {
+    if (showAll) {
+      setShowAll(false);
+      setOpenCos(companyGroups.map((g) => g.key).filter((k) => k !== key));
+      return;
+    }
+    setOpenCos((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  }
+
+  function togglePick(id: string) {
+    setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  function togglePickGroup(ids: string[]) {
+    setPicked((prev) => {
+      const allOn = ids.every((id) => prev.includes(id));
+      if (allOn) return prev.filter((id) => !ids.includes(id));
+      return Array.from(new Set([...prev, ...ids]));
+    });
+  }
+
+  async function doAssign() {
+    if (!assignCo || !picked.length) return;
+    const companyId = assignCo === "__none__" ? "" : assignCo;
+    await onAssignToCompany(picked, companyId);
+    setPicked([]);
+    setAssignCo("");
+  }
+
+  if (archived) {
+    return (
+      <>
         <div className="igm-toolbar end">
           <button type="button" className="btn" disabled={!unseenArchived} onClick={onMarkSeen}>
             ✓ Marchează toate ca văzute
           </button>
         </div>
-      ) : (
-        <div className="igm-toolbar">
-          <button type="button" className="btn" onClick={() => openModal("candidate")}>
-            ＋ Adaugă candidat
-          </button>
-        </div>
-      )}
-      <div className="igm-split">
-        <div className="card-plain">
-          <h2>
-            {archived ? "Candidați arhivați" : "Candidați"} ({arr.length})
-          </h2>
-          <input
-            className="igm-input"
-            placeholder="Nume, prenume, companie sau ID"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          />
-          <div className="igm-people">
-            {arr.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                className={`igm-person ${current?.id === c.id ? "active" : ""}`}
-                onClick={() => setSelected(c.id)}
-              >
-                <strong>{cn(c)}</strong>
-                <small>
-                  {companyName(data, c.companyId)} · {c.id}
-                </small>
-              </button>
-            ))}
-            {!arr.length ? <p className="hint">Niciun candidat.</p> : null}
+        <div className="igm-split">
+          <div className="card-plain">
+            <h2>Candidați arhivați ({arr.length})</h2>
+            <input
+              className="igm-input"
+              placeholder="Nume, prenume, companie sau ID"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+            <div className="igm-people">
+              {arr.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  data-person-id={c.id}
+                  className={`igm-person ${current?.id === c.id ? "active" : ""}`}
+                  onClick={() => setSelected(c.id)}
+                >
+                  <strong>{cn(c)}</strong>
+                  <small>
+                    {companyName(data, c.companyId)} · {c.id}
+                  </small>
+                </button>
+              ))}
+              {!arr.length ? <p className="hint">Niciun candidat.</p> : null}
+            </div>
+          </div>
+          <div className="card-plain">
+            {current ? (
+              <PersonDetail
+                data={data}
+                c={current}
+                openModal={openModal}
+                onRestore={onRestore}
+                busy={busy}
+                onUploadFile={onUploadFile}
+                onDeleteFile={onDeleteFile}
+              />
+            ) : (
+              <p className="hint">Selectează un candidat.</p>
+            )}
           </div>
         </div>
-        <div className="card-plain">
-          {current ? (
-            <PersonDetail
-              data={data}
-              c={current}
-              openModal={openModal}
-              onRestore={onRestore}
-              busy={busy}
-              onUploadFile={onUploadFile}
-              onDeleteFile={onDeleteFile}
-            />
-          ) : (
-            <p className="hint">Selectează un candidat.</p>
-          )}
-        </div>
+      </>
+    );
+  }
+
+  const firms = activeCompanies(data);
+
+  return (
+    <>
+      <div className="igm-toolbar">
+        <button type="button" className="btn" onClick={() => openModal("candidate")}>
+          ＋ Adaugă candidat
+        </button>
+        <input
+          className="igm-input narrow"
+          placeholder="Caută…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
+        <button
+          type="button"
+          className={`btn btn-ghost ${showAll ? "on" : ""}`}
+          onClick={() => {
+            if (showAll) {
+              setShowAll(false);
+              setOpenCos([]);
+            } else {
+              setShowAll(true);
+            }
+          }}
+        >
+          {showAll ? "Închide tot" : "Vezi tot"}
+        </button>
+        {picked.length ? (
+          <>
+            <select
+              className="igm-input narrow"
+              value={assignCo}
+              onChange={(e) => setAssignCo(e.target.value)}
+            >
+              <option value="">Mută la…</option>
+              <option value="__none__">Neatribuită</option>
+              {firms.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="btn"
+              disabled={!assignCo || busy}
+              onClick={() => void doAssign()}
+            >
+              {assignCo === "__none__"
+                ? `Scoate la Neatribuită (${picked.length})`
+                : `Atribuie (${picked.length})`}
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={() => setPicked([])}>
+              Anulează
+            </button>
+          </>
+        ) : null}
       </div>
+
+      <div className="pass-board">
+        <div className="pass-board-head">
+          <h2>
+            Candidați ({arr.length})
+          </h2>
+          <p className="hint">
+            Grupat pe firmă — bifează și atribuie lotul când știi unde pleacă.
+          </p>
+        </div>
+        {companyGroups.length ? (
+          companyGroups.map((g) => {
+            const open = showAll || openCos.includes(g.key);
+            const groupIds = g.items.map((c) => c.id);
+            const allPicked = groupIds.length > 0 && groupIds.every((id) => picked.includes(id));
+            return (
+              <section key={g.key} className={`pass-day ${open ? "open" : ""}`}>
+                <button
+                  type="button"
+                  className="pass-day-toggle"
+                  onClick={() => toggleCo(g.key)}
+                  aria-expanded={open}
+                >
+                  <span className="pass-day-chevron" aria-hidden>
+                    {open ? "▾" : "▸"}
+                  </span>
+                  <strong className="peop-co-name">{g.label}</strong>
+                  <em>
+                    {g.items.length} {g.items.length === 1 ? "candidat" : "candidați"}
+                  </em>
+                </button>
+                {open ? (
+                  <div className="pass-day-body">
+                    <table className="table pass-day-table peop-board-table">
+                      <thead>
+                        <tr>
+                          <th className="peop-check-col">
+                            <input
+                              type="checkbox"
+                              checked={allPicked}
+                              onChange={() => togglePickGroup(groupIds)}
+                              aria-label="Selectează grupul"
+                            />
+                          </th>
+                          <th>Candidat</th>
+                          {PEOPLE_DOC_COLS.map((col) => (
+                            <th key={col.type} className="peop-doc-col">
+                              {col.short}
+                            </th>
+                          ))}
+                          <th>Acțiuni</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {g.items.map((c) => {
+                          const hit = focusId === c.id || selected === c.id;
+                          return (
+                            <tr
+                              key={c.id}
+                              data-person-id={c.id}
+                              className={hit ? "igm-row-focus" : undefined}
+                            >
+                              <td>
+                                <input
+                                  type="checkbox"
+                                  checked={picked.includes(c.id)}
+                                  onChange={() => togglePick(c.id)}
+                                  aria-label={`Selectează ${cn(c)}`}
+                                />
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="peop-name-btn"
+                                  onClick={() => setSelected(c.id)}
+                                >
+                                  {cn(c)}
+                                </button>
+                              </td>
+                              {PEOPLE_DOC_COLS.map((col) => {
+                                const st = personDocState(data, c.id, col.type);
+                                return (
+                                  <td key={col.type} className="peop-doc-col">
+                                    <button
+                                      type="button"
+                                      className={`peop-doc-chip ${st}`}
+                                      title={
+                                        st === "ok"
+                                          ? `${col.type}: depus`
+                                          : st === "partial"
+                                            ? `${col.type}: înregistrat, fără fișier`
+                                            : `${col.type}: lipsește`
+                                      }
+                                      onClick={() => {
+                                        setSelected(c.id);
+                                        if (st !== "ok") {
+                                          openModal("document", "", col.type, c.id);
+                                        }
+                                      }}
+                                    >
+                                      {st === "ok" ? "✓" : st === "partial" ? "·" : "–"}
+                                    </button>
+                                  </td>
+                                );
+                              })}
+                              <td className="btn-row">
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  onClick={() => openModal("candidateEdit", c.id)}
+                                >
+                                  ✎
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-danger"
+                                  onClick={() => openModal("archive", c.id)}
+                                >
+                                  ✕
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+              </section>
+            );
+          })
+        ) : (
+          <p className="hint">Niciun candidat.</p>
+        )}
+      </div>
+
+      {current && !archived ? (
+        <div className="card-plain peop-detail-card">
+          <PersonDetail
+            data={data}
+            c={current}
+            openModal={openModal}
+            onRestore={onRestore}
+            busy={busy}
+            onUploadFile={onUploadFile}
+            onDeleteFile={onDeleteFile}
+          />
+        </div>
+      ) : null}
     </>
   );
 }
@@ -1744,12 +2226,19 @@ function CompaniesView({
   );
 }
 
+function weekdayRo(iso: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return "";
+  const name = new Date(iso + "T12:00:00").toLocaleDateString("ro-RO", { weekday: "long" });
+  return name;
+}
+
 function DocumentsView({
   data,
   type,
   page,
   filter,
   setFilter,
+  focusId,
   openModal,
   softDelete,
   onUpload,
@@ -1759,6 +2248,7 @@ function DocumentsView({
   page: string;
   filter: string;
   setFilter: (v: string) => void;
+  focusId: string;
   openModal: (k: ModalKind, id?: string, t?: string) => void;
   softDelete: (table: string, id: string) => Promise<void>;
   onUpload: (docId: string, file: File) => Promise<void>;
@@ -1772,6 +2262,7 @@ function DocumentsView({
         companyName(data, x.companyId),
         x.number,
         x.trackingNumber,
+        x.sentDate,
       ),
   );
   const passport = type === "Pasaport Nepal";
@@ -1781,6 +2272,214 @@ function DocumentsView({
       : type === "Pasaport Nepal"
         ? "Adaugă pașaport Nepal"
         : `Adaugă ${page.toLowerCase().replace(/ii$/, "ie").replace(/e$/, "ă") || "document"}`;
+
+  const passportGroups = useMemo(() => {
+    if (!passport) return [];
+    const map = new Map<string, typeof arr>();
+    for (const x of arr) {
+      const key = x.sentDate?.slice(0, 10) || "fara-data";
+      const list = map.get(key) || [];
+      list.push(x);
+      map.set(key, list);
+    }
+    return Array.from(map.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([date, items]) => ({ date, items }));
+  }, [arr, passport]);
+
+  const [openDates, setOpenDates] = useState<string[]>([]);
+  const [showAll, setShowAll] = useState(false);
+  const passInit = useRef(false);
+
+  useEffect(() => {
+    if (!passport) return;
+    setOpenDates((prev) => {
+      const still = prev.filter((d) => passportGroups.some((g) => g.date === d));
+      if (still.length) return still;
+      if (!passInit.current && passportGroups[0]) {
+        passInit.current = true;
+        return [passportGroups[0].date];
+      }
+      return still;
+    });
+  }, [passport, passportGroups]);
+
+  function toggleDate(date: string) {
+    if (showAll) {
+      setShowAll(false);
+      setOpenDates(passportGroups.map((g) => g.date).filter((d) => d !== date));
+      return;
+    }
+    setOpenDates((prev) => (prev.includes(date) ? prev.filter((d) => d !== date) : [...prev, date]));
+  }
+
+  function toggleShowAll() {
+    if (showAll) {
+      setShowAll(false);
+      setOpenDates([]);
+      return;
+    }
+    setShowAll(true);
+  }
+
+  useEffect(() => {
+    if (!focusId) return;
+    if (passport) {
+      const group = passportGroups.find((g) => g.items.some((x) => x.id === focusId));
+      if (group) {
+        setShowAll(false);
+        setOpenDates((prev) => (prev.includes(group.date) ? prev : [...prev, group.date]));
+      }
+    }
+    const t = window.setTimeout(() => {
+      document
+        .querySelector(`[data-doc-id="${focusId}"]`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [focusId, passport, passportGroups]);
+
+  function renderPassportRow(x: (typeof arr)[number]) {
+    const files = data.files.filter((f) => f.documentId === x.id);
+    return (
+      <tr
+        key={x.id}
+        data-doc-id={x.id}
+        className={focusId === x.id ? "igm-row-focus" : undefined}
+      >
+        <td>{cn(candidateOf(data, x.candidateId))}</td>
+        <td>{companyName(data, x.companyId)}</td>
+        <td>{x.number || "—"}</td>
+        <td>{x.trackingNumber || "—"}</td>
+        <td>
+          {files.map((f) => (
+            <a
+              key={f.id}
+              className="igm-file-link"
+              href={IgmApi.downloadUrl(f.id)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {f.originalName}
+            </a>
+          ))}
+          <label className="igm-upload">
+            + PDF/PNG
+            <input
+              type="file"
+              accept=".pdf,.png,application/pdf,image/png"
+              hidden
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void onUpload(x.id, file);
+                e.target.value = "";
+              }}
+            />
+          </label>
+        </td>
+        <td className="btn-row">
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => openModal("documentEdit", x.id, x.type)}
+          >
+            ✎
+          </button>
+          <button
+            type="button"
+            className="btn btn-danger"
+            onClick={() => void softDelete("documents", x.id)}
+          >
+            ✕
+          </button>
+        </td>
+      </tr>
+    );
+  }
+
+  if (passport) {
+    return (
+      <>
+        <div className="igm-toolbar">
+          <button
+            type="button"
+            className="btn"
+            onClick={() => openModal("document", "", type)}
+          >
+            ＋ {addLabel}
+          </button>
+          <input
+            className="igm-input narrow"
+            placeholder="Caută…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+          <button
+            type="button"
+            className={`btn btn-ghost ${showAll ? "on" : ""}`}
+            onClick={toggleShowAll}
+          >
+            {showAll ? "Închide tot" : "Vezi tot"}
+          </button>
+        </div>
+        <div className="pass-board">
+          <div className="pass-board-head">
+            <h2>
+              {page} ({arr.length})
+            </h2>
+            <p className="hint">Grupat pe data trimiterii — click pe zi ca să vezi candidații.</p>
+          </div>
+          {passportGroups.length ? (
+            passportGroups.map((g) => {
+              const open = showAll || openDates.includes(g.date);
+              const label =
+                g.date === "fara-data"
+                  ? "Fără dată trimitere"
+                  : `${fmt(g.date)} · ${weekdayRo(g.date)}`;
+              return (
+                <section key={g.date} className={`pass-day ${open ? "open" : ""}`}>
+                  <button
+                    type="button"
+                    className="pass-day-toggle"
+                    onClick={() => toggleDate(g.date)}
+                    aria-expanded={open}
+                  >
+                    <span className="pass-day-chevron" aria-hidden>
+                      {open ? "▾" : "▸"}
+                    </span>
+                    <strong>{label}</strong>
+                    <em>
+                      {g.items.length}{" "}
+                      {g.items.length === 1 ? "trimitere" : "trimiteri"}
+                    </em>
+                  </button>
+                  {open ? (
+                    <div className="pass-day-body">
+                      <table className="table pass-day-table">
+                        <thead>
+                          <tr>
+                            <th>Candidat</th>
+                            <th>Companie</th>
+                            <th>Nr. pașaport</th>
+                            <th>Tracking UPS</th>
+                            <th>Fișiere</th>
+                            <th>Acțiuni</th>
+                          </tr>
+                        </thead>
+                        <tbody>{g.items.map((x) => renderPassportRow(x))}</tbody>
+                      </table>
+                    </div>
+                  ) : null}
+                </section>
+              );
+            })
+          ) : (
+            <p className="hint">Niciun pașaport înregistrat.</p>
+          )}
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -1811,20 +2510,10 @@ function DocumentsView({
             <tr>
               <th>Candidat</th>
               <th>Companie</th>
-              {passport ? (
-                <>
-                  <th>Nr. pașaport</th>
-                  <th>Tracking UPS</th>
-                  <th>Trimitere</th>
-                </>
-              ) : (
-                <>
-                  <th>Număr</th>
-                  <th>Emitere</th>
-                  <th>Expirare</th>
-                  <th>Zile</th>
-                </>
-              )}
+              <th>Număr</th>
+              <th>Emitere</th>
+              <th>Expirare</th>
+              <th>Zile</th>
               <th>Fișiere</th>
               <th>Acțiuni</th>
             </tr>
@@ -1834,29 +2523,23 @@ function DocumentsView({
               const d = daysUntil(x.expiryDate);
               const files = data.files.filter((f) => f.documentId === x.id);
               return (
-                <tr key={x.id}>
+                <tr
+                  key={x.id}
+                  data-doc-id={x.id}
+                  className={focusId === x.id ? "igm-row-focus" : undefined}
+                >
                   <td>{cn(candidateOf(data, x.candidateId))}</td>
                   <td>{companyName(data, x.companyId)}</td>
-                  {passport ? (
-                    <>
-                      <td>{x.number || "—"}</td>
-                      <td>{x.trackingNumber || "—"}</td>
-                      <td>{fmt(x.sentDate)}</td>
-                    </>
-                  ) : (
-                    <>
-                      <td>{x.number || "—"}</td>
-                      <td>{fmt(x.issueDate)}</td>
-                      <td>{fmt(x.expiryDate)}</td>
-                      <td>
-                        {x.expiryDate && d !== null ? (
-                          <Chip text={`${d} zile`} color={zone(d)} />
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                    </>
-                  )}
+                  <td>{x.number || "—"}</td>
+                  <td>{fmt(x.issueDate)}</td>
+                  <td>{fmt(x.expiryDate)}</td>
+                  <td>
+                    {x.expiryDate && d !== null ? (
+                      <Chip text={`${d} zile`} color={zone(d)} />
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                   <td>
                     {files.map((f) => (
                       <a
@@ -1913,12 +2596,14 @@ function SubmissionsView({
   data,
   filter,
   setFilter,
+  focusId,
   openModal,
   softDelete,
 }: {
   data: IgmData;
   filter: string;
   setFilter: (v: string) => void;
+  focusId: string;
   openModal: (k: ModalKind, id?: string) => void;
   softDelete: (table: string, id: string) => Promise<void>;
 }) {
@@ -1933,6 +2618,17 @@ function SubmissionsView({
         x.number,
       ),
   );
+
+  useEffect(() => {
+    if (!focusId) return;
+    const t = window.setTimeout(() => {
+      document
+        .querySelector(`[data-sub-id="${focusId}"]`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 60);
+    return () => window.clearTimeout(t);
+  }, [focusId]);
+
   return (
     <>
       <div className="igm-toolbar">
@@ -1962,7 +2658,11 @@ function SubmissionsView({
           </thead>
           <tbody>
             {arr.map((x) => (
-              <tr key={x.id}>
+              <tr
+                key={x.id}
+                data-sub-id={x.id}
+                className={focusId === x.id ? "igm-row-focus" : undefined}
+              >
                 <td>{fmt(x.scheduledDate)}</td>
                 <td>{fmt(x.date)}</td>
                 <td>{companyName(data, x.companyId)}</td>
@@ -2250,10 +2950,20 @@ function IgmModal({
   const presetPerson = data.candidates.find((c) => c.id === presetCandidateId);
 
   const [docType, setDocType] = useState(document?.type || presetType || "Invitatie");
-  const [newMode, setNewMode] = useState(false);
+  const [newMode, setNewMode] = useState(
+    () => !presetCandidateId && (document?.type || presetType) === "Pasaport Nepal",
+  );
   const [pickedCandidate, setPickedCandidate] = useState(presetCandidateId || "");
   const [candQuery, setCandQuery] = useState("");
   const [docFiles, setDocFiles] = useState<File[]>([]);
+  const passportFlow = docType === "Pasaport Nepal";
+
+  useEffect(() => {
+    if (passportFlow && !presetPerson && !editId) {
+      setNewMode(true);
+      setPickedCandidate("");
+    }
+  }, [passportFlow, presetPerson, editId]);
   const [pickupItems, setPickupItems] = useState([{ type: "Invitatii", quantity: 1 }]);
   const [batchGroups, setBatchGroups] = useState([
     {
@@ -2310,13 +3020,19 @@ function IgmModal({
       body.candidateId = pickedCandidate;
     }
     if (["document", "submission"].includes(kind) && !editId) {
-      body.candidateId = newMode ? "" : pickedCandidate;
-      if (!newMode) {
+      const forceNewPassport = kind === "document" && passportFlow && !presetCandidateId;
+      const useNew = forceNewPassport || newMode;
+      body.candidateId = useNew ? "" : pickedCandidate;
+      if (forceNewPassport) {
+        delete body.companyId;
+        delete body.newCompanyName;
+      }
+      if (!useNew) {
         delete body.newFirstName;
         delete body.newLastName;
       }
-      if (!newMode && !pickedCandidate) return;
-      if (!newMode && pickedCandidate) {
+      if (!useNew && !pickedCandidate) return;
+      if (!useNew && pickedCandidate) {
         const person = data.candidates.find((c) => c.id === pickedCandidate);
         if (person?.companyId) body.companyId = person.companyId;
       }
@@ -2432,6 +3148,24 @@ function IgmModal({
                       Documentul apare automat la candidat și în tab-ul tipului (Invitații / Permise…).
                     </p>
                     <input type="hidden" name="companyId" value={presetPerson.companyId || ""} />
+                  </div>
+                </div>
+              ) : passportFlow && kind === "document" ? (
+                <div className="wide igm-section">
+                  <div className="igm-section-label">Candidat nou</div>
+                  <p className="hint" style={{ marginTop: 0 }}>
+                    Pentru pașapoarte creezi doar candidatul. Compania și tracking-ul le poți adăuga
+                    ulterior.
+                  </p>
+                  <div className="igm-formgrid">
+                    <label>
+                      Prenume *
+                      <input name="newFirstName" required />
+                    </label>
+                    <label>
+                      Nume *
+                      <input name="newLastName" required />
+                    </label>
                   </div>
                 </div>
               ) : (
@@ -2619,14 +3353,14 @@ function IgmModal({
                       : "Număr document"}
                 <input name="number" defaultValue={document?.number || ""} placeholder="ex. EB0000" />
               </label>
-              {docType === "Pasaport Nepal" ? (
+              {passportFlow ? (
                 <>
                   <label>
-                    Tracking UPS *
+                    Tracking UPS
                     <input
                       name="trackingNumber"
-                      required
                       defaultValue={document?.trackingNumber || ""}
+                      placeholder="Opțional — poți completa după trimitere"
                     />
                   </label>
                   <label>
@@ -2636,26 +3370,6 @@ function IgmModal({
                       type="date"
                       required
                       defaultValue={document?.sentDate || today()}
-                    />
-                  </label>
-                  <label>
-                    Data emiterii (opțional)
-                    <input name="issueDate" type="date" defaultValue={document?.issueDate || ""} />
-                  </label>
-                  <label>
-                    Data expirării (opțional)
-                    <input
-                      name="expiryDate"
-                      type="date"
-                      defaultValue={document?.expiryDate || ""}
-                    />
-                  </label>
-                  <label>
-                    Data livrării (opțional)
-                    <input
-                      name="deliveryDate"
-                      type="date"
-                      defaultValue={document?.deliveryDate || ""}
                     />
                   </label>
                 </>
@@ -2695,16 +3409,22 @@ function IgmModal({
                 <textarea name="notes" defaultValue={document?.notes || ""} />
               </label>
               <label className="wide">
-                {kind === "document" ? "Încarcă document (PDF/PNG) *" : "Adaugă fișier (PDF/PNG)"}
+                {passportFlow
+                  ? "Încarcă fișier (opțional)"
+                  : kind === "document"
+                    ? "Încarcă document (PDF/PNG) *"
+                    : "Adaugă fișier (PDF/PNG)"}
                 <input
                   type="file"
                   accept=".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,application/pdf,image/*"
                   multiple
-                  required={kind === "document"}
+                  required={kind === "document" && !passportFlow}
                   onChange={(e) => setDocFiles(Array.from(e.target.files || []))}
                 />
                 <span className="hint">
-                  Fișierul apare la candidat și bifează verde tipul (Invitație / Decizie / Permis…).
+                  {passportFlow
+                    ? "Nu e obligatoriu — pașapoartele nu se scanează acum. Tracking-ul îl poți adăuga ulterior."
+                    : "Fișierul apare la candidat și bifează verde tipul (Invitație / Decizie / Permis…)."}
                   {docFiles.length ? ` Selectat: ${docFiles.map((f) => f.name).join(", ")}` : ""}
                 </span>
               </label>

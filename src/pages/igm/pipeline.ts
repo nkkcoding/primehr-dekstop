@@ -164,6 +164,11 @@ function hasFileOfType(data: IgmData, candidateId: string, type: string): boolea
   return data.files.some((f) => ids.has(f.documentId));
 }
 
+/** Contract uploaded = documents signed — gate for dashboard “De făcut acum”. */
+export function hasSignedDocuments(data: IgmData, candidateId: string): boolean {
+  return hasFileOfType(data, candidateId, "Contract");
+}
+
 function hasAnyFile(data: IgmData, candidateId: string): boolean {
   const docs = candidateDocs(data, candidateId);
   const ids = new Set(docs.map((d) => d.id));
@@ -292,4 +297,83 @@ export function urgentProcessPeople(data: IgmData) {
     })
     .filter((x) => x.days !== null && (x.days as number) >= 0 && (x.days as number) <= 3)
     .sort((a, b) => (a.days as number) - (b.days as number));
+}
+
+export type TodoCompanyKind = "late" | "urgent" | "work";
+
+/**
+ * Dashboard “De făcut acum”: companies only, and only after signed docs (contract file).
+ * Passport-only / Cerere / neatribuită do not appear.
+ */
+export function todoCompaniesNow(data: IgmData) {
+  const byCompany = new Map<
+    string,
+    {
+      companyId: string;
+      active: number;
+      late: number;
+      urgent: number;
+      minDays: number | null;
+      steps: PipelineStep[];
+    }
+  >();
+
+  for (const c of data.candidates) {
+    if (c.deletedAt || !c.companyId) continue;
+    if (!hasSignedDocuments(data, c.id)) continue;
+    const step = inferPipelineStep(data, c);
+    if (step === "Finalizat") continue;
+
+    const days = stepDeadlineDays(data, c, step);
+    const row = byCompany.get(c.companyId) || {
+      companyId: c.companyId,
+      active: 0,
+      late: 0,
+      urgent: 0,
+      minDays: null as number | null,
+      steps: [] as PipelineStep[],
+    };
+    row.active += 1;
+    row.steps.push(step);
+    if (days !== null) {
+      if (days < 0) row.late += 1;
+      else if (days <= 3) row.urgent += 1;
+      if (row.minDays === null || days < row.minDays) row.minDays = days;
+    }
+    byCompany.set(c.companyId, row);
+  }
+
+  const firms = new Map(data.companies.filter((x) => !x.deletedAt).map((f) => [f.id, f]));
+
+  return Array.from(byCompany.values())
+    .map((row) => {
+      const f = firms.get(row.companyId);
+      if (!f) return null;
+      const kind: TodoCompanyKind =
+        row.late > 0 ? "late" : row.urgent > 0 ? "urgent" : "work";
+      const dominant =
+        row.steps.sort(
+          (a, b) =>
+            row.steps.filter((s) => s === b).length - row.steps.filter((s) => s === a).length,
+        )[0] || "Documentare";
+      return {
+        f,
+        kind,
+        active: row.active,
+        late: row.late,
+        urgent: row.urgent,
+        days: row.minDays,
+        step: dominant as PipelineStep,
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => Boolean(x))
+    .sort((a, b) => {
+      const rank = { late: 0, urgent: 1, work: 2 };
+      return (
+        rank[a.kind] - rank[b.kind] ||
+        (a.days ?? 99) - (b.days ?? 99) ||
+        b.active - a.active ||
+        a.f.name.localeCompare(b.f.name, "ro")
+      );
+    });
 }
